@@ -14,7 +14,7 @@ import { UsageError } from "../core/errors.js";
 import { waitForRunning } from "../core/waiters.js";
 import { assertBudget } from "../guard/budget.js";
 import { composeStartCommand, recordTTL } from "../guard/ttl.js";
-import { debug, note, success, warn } from "../output/format.js";
+import { debug, isJson, note, success, warn } from "../output/format.js";
 import { t } from "../output/i18n.js";
 import { execCommand } from "../ssh/exec.js";
 import { pull, push } from "../ssh/transfer.js";
@@ -97,6 +97,10 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
 
   await assertBudget(client, options.minBalanceYuan);
 
+  // Arm the shutdown timer at boot so the instance protects itself even if this
+  // process dies before it can do anything else.
+  const startCommand = composeStartCommand(options.ttlSeconds, undefined);
+
   note(t("instance.creating"));
   const uuid = await createInstance(client, {
     gpuSpec: spec.id,
@@ -106,11 +110,7 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
     ...(options.diskGb !== undefined ? { expandSystemDiskGb: options.diskGb } : {}),
     ...(regions.length ? { regions } : {}),
     ...(options.name ? { name: options.name } : {}),
-    // Arm the shutdown timer at boot so the instance protects itself even if this
-    // process dies before it can do anything else.
-    ...(composeStartCommand(options.ttlSeconds, undefined)
-      ? { startCommand: composeStartCommand(options.ttlSeconds, undefined) as string }
-      : {}),
+    ...(startCommand ? { startCommand } : {}),
   });
   recordTTL({
     uuid,
@@ -146,7 +146,8 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
     note(t("run.executing"));
     const result = await execCommand(client, uuid, options.command, {
       capture: true,
-      stdout: process.stderr,
+      // Same rule as `autodl exec`: stdout only when it isn't carrying the payload.
+      stdout: isJson() ? process.stderr : process.stdout,
       stderr: process.stderr,
       cwd: options.sync ? workdir : undefined,
       ...(options.env ? { env: options.env } : {}),

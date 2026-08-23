@@ -6,7 +6,7 @@ import {
   type GlobalOptions,
   runOpportunisticSweep,
 } from "../context.js";
-import { type AutoDLError, ExitCode, toAutoDLError, UsageError } from "../core/errors.js";
+import { ExitCode, toAutoDLError, UsageError } from "../core/errors.js";
 import { configureOutput, emitError, isJson } from "../output/format.js";
 import { resolveLang, setLang } from "../output/i18n.js";
 
@@ -115,16 +115,4 @@ export async function confirmDestructive(message: string, yes: boolean): Promise
   const answer = await confirm({ message });
   if (isCancel(answer)) return false;
   return answer === true;
-}
-
-export function parsePositiveInt(value: string, name: string): number {
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    throw new UsageError(`${name} 必须是非负整数，收到 "${value}"`);
-  }
-  return parsed;
-}
-
-export function assertNoError(condition: boolean, error: AutoDLError): void {
-  if (!condition) throw error;
 }

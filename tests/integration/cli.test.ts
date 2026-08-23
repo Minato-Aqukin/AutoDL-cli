@@ -245,6 +245,31 @@ describe("safety defaults", () => {
   });
 });
 
+describe("remote output routing", () => {
+  // `autodl exec box "cat file" > out.txt` has to work for a human, while --json mode
+  // (and MCP, which sets it) needs stdout reserved for the payload.
+  it("sends remote stdout to stdout in human mode", async () => {
+    overrides.set("/api/v1/dev/instance/pro/status", {
+      body: { code: "Success", msg: "", data: "shutdown" },
+    });
+    const result = await runCli(["exec", "pro-1", "echo", "hi"]);
+    // The instance is stopped, so this fails before connecting — the point is that the
+    // failure is reported on stderr and stdout is left clean for real output.
+    expect(result.code).toBe(8);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("SSH");
+  });
+
+  it("keeps stdout pure JSON for exec under --json", async () => {
+    overrides.set("/api/v1/dev/instance/pro/status", {
+      body: { code: "Success", msg: "", data: "shutdown" },
+    });
+    const result = await runCli(["exec", "pro-1", "echo", "hi", "--json"]);
+    expect(() => JSON.parse(result.stdout)).not.toThrow();
+    expect(result.json).toMatchObject({ ok: false, error: { code: "SSH_FAILED" } });
+  });
+});
+
 describe("the TTL sweep", () => {
   // Commander maps `--no-sweep` to `sweep: false`, not `noSweep: true`. Reading the
   // wrong key silently disables the flag, so assert on observable behaviour.

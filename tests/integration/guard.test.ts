@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AutoDLClient } from "../../src/core/client.js";
-import { assertBudget } from "../../src/guard/budget.js";
 import { BudgetError } from "../../src/core/errors.js";
+import { assertBudget } from "../../src/guard/budget.js";
 import { mockFetch } from "../fixtures/mock-fetch.js";
 
 /**
@@ -67,9 +67,7 @@ describe("the balance gate", () => {
   it("can be disabled entirely with a zero threshold", async () => {
     // Nothing should be fetched at all when the gate is off.
     const fetchMock = mockFetch([{ path: BALANCE, response: balanceOf(0) }]);
-    await expect(assertBudget(client(fetchMock.impl), 0)).resolves.toBe(
-      Number.POSITIVE_INFINITY,
-    );
+    await expect(assertBudget(client(fetchMock.impl), 0)).resolves.toBe(Number.POSITIVE_INFINITY);
     expect(fetchMock.calls).toHaveLength(0);
   });
 
@@ -126,7 +124,9 @@ describe("the TTL sweep", () => {
     const { recordTTL, sweepExpired } = await guard();
     recordTTL({ uuid: "pro-fresh", ttlSeconds: 3600, inInstanceTimer: true });
 
-    const fetchMock = mockFetch([{ path: STATUS, response: { code: "Success", msg: "", data: "running" } }]);
+    const fetchMock = mockFetch([
+      { path: STATUS, response: { code: "Success", msg: "", data: "running" } },
+    ]);
     const result = await sweepExpired(client(fetchMock.impl));
 
     expect(result.stopped).toEqual([]);
@@ -165,9 +165,7 @@ describe("the TTL sweep", () => {
       inInstanceTimer: true,
     });
 
-    const fetchMock = mockFetch([
-      { path: STATUS, response: { code: "Fail", msg: "实例不存在" } },
-    ]);
+    const fetchMock = mockFetch([{ path: STATUS, response: { code: "Fail", msg: "实例不存在" } }]);
     const result = await sweepExpired(client(fetchMock.impl));
 
     expect(result.failed).toHaveLength(1);

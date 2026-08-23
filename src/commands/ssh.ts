@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import pc from "picocolors";
 import { parseDuration } from "../core/duration.js";
-import { emit, formatBytes, note, printKeyValues, success } from "../output/format.js";
+import { emit, formatBytes, isJson, note, printKeyValues, success } from "../output/format.js";
 import { connectInteractive } from "../ssh/connect.js";
 import { getCredentials } from "../ssh/credentials.js";
 import { execCommand } from "../ssh/exec.js";
@@ -70,8 +70,10 @@ export function registerSSHCommands(program: Command): void {
           const result = await execCommand(context.client, id, remoteCommand, {
             autoStart: options.start,
             capture: true,
-            // Remote output goes to stderr so stdout stays pure JSON in --json mode.
-            stdout: process.stderr,
+            // Humans expect `autodl exec box "cat f" > out.txt` to work, so remote
+            // stdout goes to stdout. In --json mode (and under MCP, which sets it)
+            // stdout is reserved for the payload, so it is diverted to stderr.
+            stdout: isJson() ? process.stderr : process.stdout,
             stderr: process.stderr,
             pty: options.pty,
             ...(options.cwd ? { cwd: options.cwd } : {}),
