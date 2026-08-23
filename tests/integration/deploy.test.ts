@@ -469,9 +469,9 @@ describe("region handling", () => {
     const fetchMock = mockFetch(routes());
     await deployWorkflow(client(fetchMock.impl), { ...base, regions: ["beijingDC2"] });
     const create = fetchMock.calls.find((c) => c.url.includes("/create"));
-    expect((create?.body as { data_center_list?: string[] }).data_center_list).toEqual([
-      "beijingDC2",
-    ]);
+    expect(create).toBeDefined();
+    const body = create?.body as { data_center_list?: string[] } | undefined;
+    expect(body?.data_center_list).toEqual(["beijingDC2"]);
   });
 
   it("rejects an elastic-deployment-only region before creating anything", async () => {

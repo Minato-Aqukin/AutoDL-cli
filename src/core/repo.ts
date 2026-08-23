@@ -72,7 +72,7 @@ export function parseRepo(input: string): ParsedRepo {
     .replace(/^\/+/, "")
     .replace(/\/+$/, "")
     .replace(/\.git$/i, "");
-  if (!path || !path.includes("/")) {
+  if (!path?.includes("/")) {
     throw new UsageError(`仓库地址缺少 owner/name："${input}"`);
   }
 

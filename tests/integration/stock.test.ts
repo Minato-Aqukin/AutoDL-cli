@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { resolveGpuSpec } from "../../src/core/catalog.js";
 import { AutoDLClient } from "../../src/core/client.js";
 import { getRegionGpuStock } from "../../src/core/endpoints/machine.js";
