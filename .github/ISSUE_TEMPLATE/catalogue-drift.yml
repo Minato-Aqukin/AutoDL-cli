@@ -1,0 +1,32 @@
+name: 目录数据过期 / Stale catalogue data
+description: GPU 规格、地区或公共基础镜像与 AutoDL 控制台不一致
+labels: [catalogue]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AutoDL 的开放 API 没有提供目录查询接口，所以这些表是内置的静态数据，
+        平台更新时就会过期。感谢你帮忙修正。
+
+        AutoDL's open API has no catalogue endpoint, so these tables are hardcoded
+        and go stale when the platform changes. Thanks for helping fix them.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 哪张表 / Which table
+      options: [GPU 规格 (gpus), 地区 (regions), 公共基础镜像 (images --base)]
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 控制台里实际是什么 / What the console actually shows
+      description: 贴出规格名称、地区代码或镜像 UUID
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: 本工具的输出 / What this tool printed
+      description: "`autodl gpus --json` / `autodl regions --json` 的输出"
+      render: json

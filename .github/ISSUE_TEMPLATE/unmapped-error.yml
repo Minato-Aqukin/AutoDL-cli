@@ -1,0 +1,30 @@
+name: 未映射的 API 错误 / Unmapped API error
+description: AutoDL 返回了一个我们没有正确分类的错误
+labels: [error-mapping]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        AutoDL 用 HTTP 200 + 非 Success 的 `code` 表示业务失败，且官方未公开这些取值。
+        我们目前靠消息文本尽力匹配，所以这类反馈特别有价值。
+
+        AutoDL signals logical failures with HTTP 200 and an undocumented `code`.
+        We match on message text as a best effort, so these reports are valuable.
+  - type: textarea
+    id: raw
+    attributes:
+      label: 原始响应 / Raw response
+      description: "运行 `autodl <command> --json --verbose`，贴出 code、msg 和 request_id"
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: expected
+    attributes:
+      label: 你觉得应该是哪个退出码 / Expected exit code
+      placeholder: "例如 6 (NO_STOCK)"
+  - type: input
+    id: command
+    attributes:
+      label: 触发的命令 / Command that triggered it
+      placeholder: "autodl create --gpu 4090 --ttl 2h"

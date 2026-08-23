@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Lowest supported version, current LTS, and current.
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm run lint
+
+      # `pretest` builds first — the CLI contract tests spawn the real binary.
+      # No network access and no AutoDL token is required.
+      - run: npm test
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # Catch a broken bin entry or missing dist before it reaches npm.
+      - name: Verify the published package actually runs
+        run: |
+          npm pack --silent
+          tarball=$(ls ./*.tgz)
+          mkdir -p /tmp/install-check && cd /tmp/install-check
+          npm init -y >/dev/null
+          npm install "$OLDPWD/$tarball" --silent
+          ./node_modules/.bin/autodl --version
+          ./node_modules/.bin/autodl gpus --json | node -e \
+            'const d=JSON.parse(require("fs").readFileSync(0,"utf8")); if(!d.ok||!d.data.length) process.exit(1)'

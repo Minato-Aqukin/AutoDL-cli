@@ -1,0 +1,84 @@
+{
+  "name": "@minatoaqukin/autodl-cli",
+  "version": "0.1.0",
+  "description": "Agent-friendly CLI, MCP server and SDK for managing AutoDL GPU instances — create, boot, SSH, run and auto-shutdown, all scriptable.",
+  "keywords": [
+    "autodl",
+    "gpu",
+    "cloud",
+    "cli",
+    "ssh",
+    "mcp",
+    "agent",
+    "llm",
+    "claude",
+    "model-context-protocol"
+  ],
+  "license": "MIT",
+  "author": "Minato-Aqukin",
+  "homepage": "https://github.com/Minato-Aqukin/AutoDL-cli#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Minato-Aqukin/AutoDL-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Minato-Aqukin/AutoDL-cli/issues"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "autodl": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src tests",
+    "lint:fix": "biome check --write src tests",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "prepublishOnly": "npm run build",
+    "release": "changeset publish",
+    "pretest": "npm run build"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.11.0",
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "cli-table3": "^0.6.5",
+    "commander": "^14.0.0",
+    "picocolors": "^1.1.1",
+    "ssh2": "^1.17.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.0",
+    "@changesets/changelog-github": "^1.0.0",
+    "@changesets/cli": "^2.29.0",
+    "@types/node": "^22.15.0",
+    "@types/ssh2": "^1.15.5",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  },
+  "allowScripts": {
+    "esbuild@0.27.7": true
+  }
+}

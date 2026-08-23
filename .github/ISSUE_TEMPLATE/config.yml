@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: AutoDL 平台问题 / AutoDL platform issues
+    url: https://www.autodl.com/
+    about: 实例本身、计费、实名认证等平台问题请联系 AutoDL 官方，本仓库是非官方第三方客户端。
