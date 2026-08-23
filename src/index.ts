@@ -89,5 +89,6 @@ export type { ExecOptions, ExecResult } from "./ssh/exec.js";
 export { execCommand, execOnConnection } from "./ssh/exec.js";
 export type { TransferOptions, TransferSummary } from "./ssh/transfer.js";
 export { pull, push } from "./ssh/transfer.js";
+export { VERSION } from "./version.js";
 export type { RunOptions, RunResult } from "./workflow/run.js";
 export { runWorkflow } from "./workflow/run.js";

@@ -9,8 +9,7 @@ import { registerRunCommand } from "./commands/run.js";
 import { registerSSHCommands } from "./commands/ssh.js";
 import { ExitCode, toAutoDLError } from "./core/errors.js";
 import { emitError } from "./output/format.js";
-
-const VERSION = "0.1.0";
+import { VERSION } from "./version.js";
 
 export function buildProgram(): Command {
   const program = new Command();

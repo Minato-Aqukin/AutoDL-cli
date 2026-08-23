@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -316,6 +316,16 @@ describe("help and version", () => {
     const result = await runCli(["--help"]);
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("autodl mcp");
+  });
+
+  it("reports the version from package.json, not a hardcoded literal", async () => {
+    // changesets rewrites package.json on release; a literal in the source would
+    // silently keep reporting the previous version.
+    const pkg = JSON.parse(
+      await readFile(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8"),
+    ) as { version: string };
+    const result = await runCli(["--version"]);
+    expect(result.stdout.trim()).toBe(pkg.version);
   });
 
   it("documents the exit codes in help output", async () => {

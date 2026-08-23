@@ -33,6 +33,7 @@ import { assertBudget } from "../guard/budget.js";
 import { armTTLOverSSH, composeStartCommand, recordTTL, sweepExpired } from "../guard/ttl.js";
 import { execCommand } from "../ssh/exec.js";
 import { pull, push } from "../ssh/transfer.js";
+import { VERSION } from "../version.js";
 import { runWorkflow } from "../workflow/run.js";
 
 /**
@@ -79,7 +80,7 @@ function tool<T>(handler: (input: T) => Promise<unknown>) {
 
 export function buildServer(context: Context): McpServer {
   const server = new McpServer(
-    { name: "autodl-cli", version: "0.1.0" },
+    { name: "autodl-cli", version: VERSION },
     {
       instructions: [
         "通过 AutoDL 官方开放 API 管理 GPU 实例：创建、开关机、SSH 执行命令、传文件。",

@@ -1,7 +1,7 @@
 {
   "name": "@minatoaqukin/autodl-cli",
-  "version": "0.1.0",
-  "description": "Agent-friendly CLI, MCP server and SDK for managing AutoDL GPU instances — create, boot, SSH, run and auto-shutdown, all scriptable.",
+  "version": "0.0.0",
+  "description": "Agent-friendly CLI, MCP server and SDK for managing AutoDL GPU instances \u2014 create, boot, SSH, run and auto-shutdown, all scriptable.",
   "keywords": [
     "autodl",
     "gpu",

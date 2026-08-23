@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -36,8 +37,12 @@ afterAll(async () => {
 });
 
 describe("the MCP server", () => {
-  it("completes the handshake and reports its name", () => {
+  it("completes the handshake and reports its name and real version", async () => {
+    const pkg = JSON.parse(
+      await readFile(fileURLToPath(new URL("../../package.json", import.meta.url)), "utf8"),
+    ) as { version: string };
     expect(client.getServerVersion()?.name).toBe("autodl-cli");
+    expect(client.getServerVersion()?.version).toBe(pkg.version);
   });
 
   it("ships instructions that warn about AutoDL's power-state billing", () => {
