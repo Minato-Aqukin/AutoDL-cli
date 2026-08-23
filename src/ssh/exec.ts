@@ -2,7 +2,7 @@ import type { Writable } from "node:stream";
 import type { Client } from "ssh2";
 import type { AutoDLClient } from "../core/client.js";
 import { SSHError, TimeoutError } from "../core/errors.js";
-import { type ConnectOptions, withSSH } from "./credentials.js";
+import { type ConnectOptions, shellQuote, withSSH } from "./credentials.js";
 
 export interface ExecResult {
   /** Remote process exit code. `null` when the process was killed by a signal. */
@@ -26,6 +26,16 @@ export interface ExecOptions extends ConnectOptions {
   env?: Record<string, string>;
   /** Request a PTY — needed for programs that check isatty (e.g. progress bars). */
   pty?: boolean;
+  /**
+   * Run through a login shell (default true).
+   *
+   * AutoDL images put python/pip/conda in `/root/miniconda3/bin`, which reaches PATH
+   * only via the login profile. A non-interactive `ssh host "cmd"` gets a bare PATH —
+   * `.bashrc` bails out at the standard "If not running interactively, don't do
+   * anything" guard — so `pip install` there fails with exit 127. A login shell matches
+   * what the user sees when they `autodl ssh` in by hand.
+   */
+  loginShell?: boolean;
 }
 
 function buildCommand(command: string, options: ExecOptions): string {
@@ -35,7 +45,9 @@ function buildCommand(command: string, options: ExecOptions): string {
   }
   if (options.cwd) parts.push(`cd ${JSON.stringify(options.cwd)}`);
   parts.push(command);
-  return parts.join(" && ");
+  const inner = parts.join(" && ");
+
+  return options.loginShell === false ? inner : `bash -lc ${shellQuote(inner)}`;
 }
 
 /** Run one command over an already-open connection. */

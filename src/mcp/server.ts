@@ -27,13 +27,16 @@ import {
   releaseInstance,
 } from "../core/endpoints/instance.js";
 import { toAutoDLError, UsageError } from "../core/errors.js";
+import { resolveGitToken } from "../core/repo.js";
 import { redactSnapshot } from "../core/schemas.js";
+import { getStockByRegion } from "../core/stock.js";
 import { waitForRunning } from "../core/waiters.js";
 import { assertBudget } from "../guard/budget.js";
 import { armTTLOverSSH, composeStartCommand, recordTTL, sweepExpired } from "../guard/ttl.js";
 import { execCommand } from "../ssh/exec.js";
 import { pull, push } from "../ssh/transfer.js";
 import { VERSION } from "../version.js";
+import { deployWorkflow } from "../workflow/deploy.js";
 import { runWorkflow } from "../workflow/run.js";
 
 /**
@@ -358,11 +361,14 @@ export function buildServer(context: Context): McpServer {
       inputSchema: {
         instance_uuid: z.string(),
         local_path: z.string().describe("本地文件或目录路径"),
-        remote_path: z.string().optional().describe("远程目标路径，默认 /root/autodl-cli"),
+        remote_path: z
+          .string()
+          .optional()
+          .describe("远程目标路径，默认 /root/autodl-tmp/autodl-cli（数据盘）"),
       },
     },
     tool(async (input: { instance_uuid: string; local_path: string; remote_path?: string }) => {
-      const remote = input.remote_path ?? "/root/autodl-cli";
+      const remote = input.remote_path ?? "/root/autodl-tmp/autodl-cli";
       const summary = await push(client, input.instance_uuid, input.local_path, remote);
       return { instance_uuid: input.instance_uuid, remote_path: remote, ...summary };
     }),
@@ -402,7 +408,10 @@ export function buildServer(context: Context): McpServer {
         image: z.string().optional(),
         regions: z.array(z.string()).optional(),
         sync: z.string().optional().describe("执行前上传的本地目录"),
-        workdir: z.string().optional().describe("远程工作目录，默认 /root/autodl-cli"),
+        workdir: z
+          .string()
+          .optional()
+          .describe("远程工作目录，默认 /root/autodl-tmp/autodl-cli（数据盘）"),
         pull_from: z.string().optional().describe("执行后回传的远程路径"),
         pull_to: z.string().optional().describe("回传产物的本地目录"),
         ttl: z.string().optional().describe("兜底自动关机时长，默认 4h"),
@@ -452,6 +461,138 @@ export function buildServer(context: Context): McpServer {
           downloaded: result.downloaded,
           final_action: result.finalAction,
           duration_ms: result.durationMs,
+        };
+      },
+    ),
+  );
+
+  server.registerTool(
+    "autodl_gpu_stock",
+    {
+      title: "查询 GPU 实时库存",
+      description: [
+        "按地区查询 GPU 空闲数量，用于在创建实例前挑一个有货的地区。",
+        "注意：数据来自 AutoDL 的「弹性部署 GPU 库存」接口，与 Pro 实例能否创建成功没有官方保证，仅供择优参考——不要据此判定「一定创建不了」。",
+        "autodl_create_instance 默认已经自动做了这件事，通常不需要单独调用。",
+      ].join("\n"),
+      inputSchema: {
+        gpu: z.string().optional().describe("只看某个 GPU 规格，如 4090 / pro6000-p"),
+        regions: z.array(z.string()).optional().describe("地区代码列表，默认查全部"),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    tool(async (input: { gpu?: string; regions?: string[] }) => {
+      const spec = input.gpu ? resolveGpuSpec(input.gpu) : undefined;
+      if (input.gpu && !spec) {
+        throw new UsageError(`未知的 GPU 规格 "${input.gpu}"`, {
+          hint: "调用 autodl_list_gpu_specs 查看全部可用规格。",
+        });
+      }
+      const { snapshots, failures } = await getStockByRegion(client, {
+        ...(input.regions?.length ? { regions: input.regions } : {}),
+        ...(spec ? { gpuNames: [spec.stockName] } : {}),
+      });
+      const rentable = new Map(GPU_SPECS.map((s) => [s.stockName, s.id]));
+      const rows = snapshots
+        .flatMap((snapshot) =>
+          snapshot.entries.map((entry) => ({
+            region: snapshot.regionId,
+            region_name: snapshot.regionName,
+            gpu_name: entry.gpuName,
+            // Null means this card cannot be rented through the open API at all.
+            gpu_spec: rentable.get(entry.gpuName) ?? null,
+            idle: entry.idle,
+            total: entry.total,
+          })),
+        )
+        .sort((a, b) => b.idle - a.idle);
+      return { rows, failures };
+    }),
+  );
+
+  server.registerTool(
+    "autodl_deploy",
+    {
+      title: "部署代码托管平台的项目",
+      description: [
+        "把一个 GitHub / Gitee / GitLab 仓库部署到 AutoDL 实例上：创建实例 → 拉代码 → 自动探测并安装依赖 → 可选启动。",
+        "与 autodl_run 的关键区别：结束时默认**关机而不释放**，实例数据完整保留。",
+        "下次带 instance_uuid 再调一次即可复用同一台机器（开机 → git pull → 重新部署），省掉重建环境的时间。",
+        "代码放在数据盘 /root/autodl-tmp/<仓库名>（系统盘只有 30G）。GitHub 会自动走学术加速。",
+        "detach=true 时会后台启动并让实例保持运行——这种情况下用完必须自己调 autodl_power_off，否则会一直计费。",
+      ].join("\n"),
+      inputSchema: {
+        repo: z.string().describe("仓库地址：https://github.com/owner/repo、git@... 或 owner/repo"),
+        gpu: z.string().optional().describe("GPU 规格；不传 instance_uuid 时必填"),
+        instance_uuid: z.string().optional().describe("复用已有实例（之前部署过并关机的那台）"),
+        branch: z.string().optional(),
+        dir: z.string().optional().describe("远程代码目录，默认 /root/autodl-tmp/<仓库名>"),
+        setup: z.string().optional().describe("自定义依赖安装命令，覆盖自动探测"),
+        no_setup: z.boolean().optional().describe("跳过依赖安装"),
+        start: z.string().optional().describe("依赖装好后执行的启动命令"),
+        detach: z.boolean().optional().describe("后台启动并保持实例运行，默认 false"),
+        git_token: z.string().optional().describe("私有仓库凭证（敏感，不会被回显）"),
+        regions: z.array(z.string()).optional(),
+        ttl: z.string().optional().describe("到期自动关机时长，默认 4h"),
+        on_finish: z
+          .enum(["poweroff", "release", "keep"])
+          .optional()
+          .describe("结束动作，默认 poweroff（关机保留数据）"),
+        timeout: z.string().optional().describe("单条远程命令超时时间"),
+      },
+      annotations: { destructiveHint: false, idempotentHint: false },
+    },
+    tool(
+      async (input: {
+        repo: string;
+        gpu?: string;
+        instance_uuid?: string;
+        branch?: string;
+        dir?: string;
+        setup?: string;
+        no_setup?: boolean;
+        start?: string;
+        detach?: boolean;
+        git_token?: string;
+        regions?: string[];
+        ttl?: string;
+        on_finish?: "poweroff" | "release" | "keep";
+        timeout?: string;
+      }) => {
+        const token = resolveGitToken(input.git_token);
+        const result = await deployWorkflow(client, {
+          repo: input.repo,
+          ...(input.gpu ? { gpu: input.gpu } : {}),
+          ...(input.instance_uuid ? { instanceUuid: input.instance_uuid } : {}),
+          ...(input.branch ? { branch: input.branch } : {}),
+          ...(input.dir ? { dir: input.dir } : {}),
+          ...(input.setup ? { setup: input.setup } : {}),
+          noSetup: input.no_setup === true,
+          ...(input.start ? { start: input.start } : {}),
+          detach: input.detach === true,
+          ...(token ? { gitToken: token } : {}),
+          ...(input.regions?.length ? { regions: input.regions } : {}),
+          ttlSeconds: parseDuration(input.ttl ?? "4h"),
+          onFinish: input.on_finish ?? "poweroff",
+          ...(input.timeout ? { commandTimeoutMs: parseDuration(input.timeout) * 1000 } : {}),
+        });
+        return {
+          instance_uuid: result.instanceUuid,
+          created: result.created,
+          repo: result.repo,
+          dir: result.dir,
+          setup_command: result.setupCommand,
+          start_command: result.startCommand,
+          detached: result.detached,
+          exit_code: result.exitCode,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          access: result.access,
+          final_action: result.finalAction,
+          duration_ms: result.durationMs,
+          note: result.detached
+            ? `实例保持运行中，用完请调用 autodl_power_off("${result.instanceUuid}") 停止计费。`
+            : `实例已关机、数据保留。复用：再次调用本工具并传 instance_uuid="${result.instanceUuid}"。`,
         };
       },
     ),

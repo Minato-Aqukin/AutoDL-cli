@@ -3,11 +3,11 @@ import type { Command } from "commander";
 import pc from "picocolors";
 import { untrackInstance } from "../config/state.js";
 import {
+  assertProCreateRegion,
   DEFAULT_BASE_IMAGE,
   findBaseImage,
   parseCudaVersion,
   resolveGpuSpec,
-  resolveRegion,
 } from "../core/catalog.js";
 import { formatDuration, parseDuration } from "../core/duration.js";
 import {
@@ -22,7 +22,8 @@ import {
 } from "../core/endpoints/instance.js";
 import { UsageError } from "../core/errors.js";
 import { formatRate } from "../core/money.js";
-import { waitForRunning } from "../core/waiters.js";
+import { chooseRegions } from "../core/stock.js";
+import { waitForRunning, waitForShutdown } from "../core/waiters.js";
 import { assertBudget } from "../guard/budget.js";
 import { armTTLOverSSH, composeStartCommand, recordTTL } from "../guard/ttl.js";
 import {
@@ -52,6 +53,7 @@ interface CreateOptions {
   startCommand?: string;
   minBalance?: string;
   wait?: boolean;
+  stockCheck?: boolean;
 }
 
 export function registerInstanceCommands(program: Command): void {
@@ -184,6 +186,7 @@ export function registerInstanceCommands(program: Command): void {
     .option("--start-command <cmd>", "开机后执行的命令")
     .option("--min-balance <yuan>", "余额低于该值时拒绝创建")
     .option("--wait", "等待实例进入 running 状态", false)
+    .option("--no-stock-check", "跳过创建前的 GPU 库存查询")
     .action(
       action(async (context, options: CreateOptions) => {
         const spec = resolveGpuSpec(options.gpu);
@@ -199,15 +202,16 @@ export function registerInstanceCommands(program: Command): void {
           ? parseCudaVersion(options.cuda)
           : parseCudaVersion(image?.cuda ?? "11.8");
 
-        const regions = (options.region ?? []).map((input) => {
-          const region = resolveRegion(input);
-          if (!region) {
-            throw new UsageError(`未知的地区 "${input}"`, {
-              hint: "运行 `autodl regions` 查看地区列表。",
-            });
-          }
-          return region.id;
-        });
+        // Pro creation accepts only two regions; anything else fails opaquely upstream.
+        const requestedRegions = (options.region ?? []).map(
+          (input) => assertProCreateRegion(input).id,
+        );
+
+        // Stock is advisory ranking only — see chooseRegions.
+        const regions =
+          options.stockCheck === false
+            ? requestedRegions
+            : (await chooseRegions(context.client, spec, requestedRegions)).regions;
 
         const ttlSeconds = options.ttl ? parseDuration(options.ttl) : undefined;
         if (!ttlSeconds) {
@@ -358,8 +362,14 @@ export function registerInstanceCommands(program: Command): void {
               hint: "先运行 `autodl stop <id>`，或加 --force 让本命令自动关机。",
             });
           }
-          note(t("instance.poweringOff"));
-          await powerOffInstance(context.client, id);
+          // A second power_off on an already-stopping instance is an error
+          // ("当前实例正在关机中,无需重复操作"), so only send it when it can act.
+          if (status !== "shutting_down") {
+            note(t("instance.poweringOff"));
+            await powerOffInstance(context.client, id);
+          }
+          // AutoDL also refuses a release until the shutdown has finished.
+          await waitForShutdown(context.client, id, { timeoutMs: 10 * 60_000 });
         }
 
         const confirmed = await confirmDestructive(

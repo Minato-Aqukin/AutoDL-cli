@@ -112,7 +112,7 @@ export function registerSSHCommands(program: Command): void {
           remote: string | undefined,
           options: { start: boolean; ignore?: string[] },
         ) => {
-          const target = remote ?? "/root/autodl-cli";
+          const target = remote ?? "/root/autodl-tmp/autodl-cli";
           const summary = await push(context.client, id, local, target, {
             autoStart: options.start,
             ...(options.ignore ? { ignore: options.ignore } : {}),

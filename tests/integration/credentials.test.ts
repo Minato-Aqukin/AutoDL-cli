@@ -102,6 +102,30 @@ describe("getCredentials", () => {
     expect(fetchMock.calls.some((call) => call.url.includes("power_on"))).toBe(true);
   });
 
+  it("waits out a mid-shutdown instance instead of hanging", async () => {
+    // Powering on a `shutting_down` instance is rejected, and waiting straight for
+    // `running` would block until the timeout. It has to settle to `shutdown` first.
+    const fetchMock = mockFetch([
+      {
+        path: STATUS,
+        response: (_c, i) =>
+          statusOk(["shutting_down", "shutting_down", "shutdown", "running"][i] ?? "running"),
+      },
+      { path: POWER_ON, response: emptySuccess },
+      { path: SNAPSHOT, response: snapshotWith(40002, "pw-after") },
+    ]);
+
+    const creds = await getCredentials(client(fetchMock.impl), "pro-1", {
+      autoStart: true,
+      waitTimeoutMs: 5_000,
+      pollIntervalMs: 1,
+    });
+
+    expect(creds.port).toBe(40002);
+    // It must have actually powered on, not just waited.
+    expect(fetchMock.calls.some((call) => call.url.includes("power_on"))).toBe(true);
+  });
+
   it("errors clearly when the instance is up but SSH info isn't populated yet", async () => {
     const fetchMock = mockFetch([
       { path: STATUS, response: statusOk("running") },

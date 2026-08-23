@@ -36,7 +36,7 @@ export function registerRunCommand(program: Command): void {
     .option("--name <name>", "实例名称")
     .option("--ttl <duration>", "到期自动关机（兜底保护，默认 4h）", "4h")
     .option("--sync <dir>", "执行前上传的本地目录")
-    .option("--workdir <dir>", "远程工作目录", "/root/autodl-cli")
+    .option("--workdir <dir>", "远程工作目录（数据盘）", "/root/autodl-tmp/autodl-cli")
     .option("--pull <remote>", "执行后回传的远程路径")
     .option("--pull-to <local>", "回传产物的本地目录", "./autodl-output")
     .option("--on-finish <action>", "结束后动作：poweroff / release / keep", "poweroff")

@@ -179,6 +179,14 @@ describe("mapEnvelopeError", () => {
     expect(mapEnvelopeError("Fail", "insufficient funds")).toBeInstanceOf(BudgetError);
   });
 
+  it("classifies the real live no-stock reply as NO_STOCK (exit 6)", () => {
+    // Captured from the live API: AutoDL uses a generic `InternalError` code and only
+    // the message identifies it, which is why matching on message text is not optional.
+    const error = mapEnvelopeError("InternalError", "当前算力规格暂无库存, 请修改配置或稍等再试");
+    expect(error).toBeInstanceOf(NoStockError);
+    expect(error.exitCode).toBe(6);
+  });
+
   it("classifies stock problems as NO_STOCK (exit 6)", () => {
     // The docs don't enumerate these codes, so we match on message text too.
     expect(mapEnvelopeError("Fail", "当前地区无可用资源")).toBeInstanceOf(NoStockError);

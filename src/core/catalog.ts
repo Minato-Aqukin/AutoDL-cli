@@ -1,3 +1,5 @@
+import { UsageError } from "./errors.js";
+
 /**
  * Static reference data.
  *
@@ -20,6 +22,13 @@ export interface GpuSpec {
   vramGb: number;
   /** Convenience aliases so `--gpu 4090` resolves without the exact spec id. */
   aliases: string[];
+  /**
+   * The name this GPU goes by in the stock endpoint, which uses a different naming
+   * scheme from `gpu_spec_uuid`. Verified against live data: westDC3 returns both
+   * `vGPU-48GB` and `vGPU-48GB-350W`, matching the `v-48g` / `v-48g-350w` split
+   * exactly, which is what makes this mapping safe to hardcode.
+   */
+  stockName: string;
 }
 
 export const GPU_SPECS: readonly GpuSpec[] = [
@@ -29,6 +38,7 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "general",
     vramGb: 80,
     aliases: ["h800", "h800-80g"],
+    stockName: "H800",
   },
   {
     id: "v-48g",
@@ -36,6 +46,7 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "general",
     vramGb: 48,
     aliases: ["4090", "4090-48g", "v-48g"],
+    stockName: "vGPU-48GB",
   },
   {
     id: "4090D",
@@ -43,6 +54,7 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "general",
     vramGb: 24,
     aliases: ["4090d"],
+    stockName: "RTX 4090D",
   },
   {
     id: "v-48g-350w",
@@ -50,6 +62,7 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "general",
     vramGb: 48,
     aliases: ["3090", "3090-48g", "v-48g-350w"],
+    stockName: "vGPU-48GB-350W",
   },
   {
     id: "pro6000-p",
@@ -57,6 +70,7 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "performance",
     vramGb: 96,
     aliases: ["pro6000", "rtx-pro-6000", "pro6000-96g"],
+    stockName: "RTX PRO 6000",
   },
   {
     id: "v-32g-p",
@@ -64,6 +78,7 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "performance",
     vramGb: 32,
     aliases: ["4080", "4080s", "4080-32g"],
+    stockName: "vGPU-32GB",
   },
   {
     id: "5090-p",
@@ -71,28 +86,96 @@ export const GPU_SPECS: readonly GpuSpec[] = [
     tier: "performance",
     vramGb: 32,
     aliases: ["5090", "5090-32g"],
+    stockName: "RTX 5090",
   },
 ] as const;
 
+/**
+ * A region in the `data_center_list` / `gpu_stock` namespace.
+ *
+ * AutoDL uses a *different* namespace in instance responses — an instance in 北京B区
+ * reports `region_sign: "bj-B2"`, not `beijingDC2`. Never feed an instance's reported
+ * region back into these APIs; see `assertStockRegion`.
+ *
+ * Names verified against the official elastic-deployment API docs, 2026-08.
+ */
 export interface Region {
   /** Value for `data_center_list` entries. */
   id: string;
   displayName: string;
   aliases: string[];
+  /**
+   * Whether Pro instance creation accepts this region in `data_center_list`.
+   *
+   * Only two do. Every other region is elastic-deployment only and makes
+   * `instance/pro/create` fail with `RequestParameterIsWrong`. Verified empirically
+   * against the live API on 2026-08-23 by probing all eleven.
+   */
+  proCreate: boolean;
 }
 
 export const REGIONS: readonly Region[] = [
-  { id: "westDC2", displayName: "西北企业区", aliases: ["west2", "西北企业"] },
-  { id: "westDC3", displayName: "西北B区", aliases: ["west3", "西北b"] },
-  { id: "beijingDC1", displayName: "北京A区", aliases: ["bj1", "北京a"] },
-  { id: "beijingDC2", displayName: "北京B区", aliases: ["bj2", "北京b"] },
-  { id: "beijingDC3", displayName: "北京C区", aliases: ["bj3", "北京c"] },
-  { id: "beijingDC4", displayName: "北京D区", aliases: ["bj4", "北京d"] },
-  { id: "neimengDC1", displayName: "内蒙A区", aliases: ["nm1", "内蒙a"] },
-  { id: "neimengDC3", displayName: "内蒙C区", aliases: ["nm3", "内蒙c"] },
-  { id: "foshanDC1", displayName: "佛山区", aliases: ["fs1", "佛山"] },
-  { id: "chongqingDC1", displayName: "重庆区", aliases: ["cq1", "重庆"] },
-  { id: "yangzhouDC1", displayName: "扬州区", aliases: ["yz1", "扬州"] },
+  {
+    id: "westDC2",
+    displayName: "西北企业区",
+    aliases: ["west2", "西北企业区", "西北企业"],
+    proCreate: false,
+  },
+  {
+    id: "westDC3",
+    displayName: "西北B区",
+    aliases: ["west3", "西北b区", "西北b"],
+    proCreate: true,
+  },
+  {
+    id: "beijingDC1",
+    displayName: "北京A区",
+    aliases: ["bj1", "北京a区", "北京a"],
+    proCreate: false,
+  },
+  {
+    id: "beijingDC2",
+    displayName: "北京B区",
+    aliases: ["bj2", "北京b区", "北京b"],
+    proCreate: true,
+  },
+  {
+    id: "beijingDC3",
+    displayName: "V100专区",
+    aliases: ["bj3", "v100", "v100专区"],
+    proCreate: false,
+  },
+  {
+    id: "beijingDC4",
+    displayName: "L20专区",
+    aliases: ["bj4", "l20", "l20专区"],
+    proCreate: false,
+  },
+  {
+    id: "neimengDC1",
+    displayName: "内蒙A区",
+    aliases: ["nm1", "内蒙a区", "内蒙a"],
+    proCreate: false,
+  },
+  {
+    id: "neimengDC3",
+    displayName: "内蒙B区",
+    aliases: ["nm3", "内蒙b区", "内蒙b"],
+    proCreate: false,
+  },
+  { id: "foshanDC1", displayName: "佛山区", aliases: ["fs1", "佛山"], proCreate: false },
+  {
+    id: "chongqingDC1",
+    displayName: "重庆A区",
+    aliases: ["cq1", "重庆a区", "重庆"],
+    proCreate: false,
+  },
+  {
+    id: "yangzhouDC1",
+    displayName: "3090专区",
+    aliases: ["yz1", "3090专区", "扬州"],
+    proCreate: false,
+  },
 ] as const;
 
 export interface BaseImage {
@@ -224,6 +307,42 @@ export function resolveRegion(input: string): Region | undefined {
       norm(region.displayName) === needle ||
       region.aliases.some((alias) => norm(alias) === needle),
   );
+}
+
+/**
+ * Guard the stock endpoint against a region id from the wrong namespace.
+ *
+ * `gpu_stock` answers an unknown region with `{"code":"Success","data":[]}` — a typo and
+ * a genuinely sold-out region are indistinguishable in the response. Without this check
+ * `--region bj-B2` would silently report "no stock" forever.
+ */
+export function assertStockRegion(input: string): Region {
+  const region = resolveRegion(input);
+  if (!region) {
+    throw new UsageError(`未知的地区 "${input}"`, {
+      hint: "运行 `autodl regions` 查看有效地区代码。注意实例返回的 region_sign（如 bj-B2）与这里的地区代码（如 beijingDC2）不是同一套命名，不能混用。",
+    });
+  }
+  return region;
+}
+
+/** Regions that `instance/pro/create` will actually accept. */
+export const PRO_CREATE_REGIONS: readonly Region[] = REGIONS.filter((region) => region.proCreate);
+
+/**
+ * Validate a region for Pro instance creation.
+ *
+ * AutoDL rejects the other nine regions with an opaque "请求参数错误", which gives the
+ * user nothing to act on. Fail here instead, naming the two that work.
+ */
+export function assertProCreateRegion(input: string): Region {
+  const region = assertStockRegion(input);
+  if (!region.proCreate) {
+    throw new UsageError(`地区 "${region.displayName}"（${region.id}）不支持创建 Pro 实例`, {
+      hint: `官方开放 API 只能在 ${PRO_CREATE_REGIONS.map((r) => `${r.displayName}(${r.id})`).join(" 或 ")} 创建实例；其余地区仅用于弹性部署。不指定 --region 时由 AutoDL 自行调度，成功率更高。`,
+    });
+  }
+  return region;
 }
 
 export function findBaseImage(input: string): BaseImage | undefined {

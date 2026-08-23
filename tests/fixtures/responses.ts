@@ -89,3 +89,47 @@ export const createResponse = {
 };
 
 export const emptySuccess = { code: "Success", msg: "", data: null, request_id: "req-empty" };
+
+/**
+ * Live gpu_stock response, captured 2026-08-23. Includes `chip_corp` / `cpu_arch`,
+ * which the published docs omit but the real API returns.
+ */
+export function stockResponse(entries: Record<string, { idle: number; total: number }>) {
+  return {
+    code: "Success",
+    msg: "",
+    request_id: "req-stock",
+    data: Object.entries(entries).map(([gpuName, v]) => ({
+      [gpuName]: {
+        total_gpu_num: v.total,
+        idle_gpu_num: v.idle,
+        chip_corp: "nvidia",
+        cpu_arch: "x86",
+      },
+    })),
+  };
+}
+
+/** An unknown region: AutoDL answers Success with an empty list, not an error. */
+export const emptyStockResponse = {
+  code: "Success",
+  msg: "",
+  data: [],
+  request_id: "req-stock-empty",
+};
+
+/** The genuine no-stock reply, captured live 2026-08-23. Docs never enumerated it. */
+export const noStockResponse = {
+  code: "InternalError",
+  msg: "当前算力规格暂无库存, 请修改配置或稍等再试",
+  data: null,
+  request_id: "req-no-stock",
+};
+
+/** What Pro creation returns for a region only elastic deployment can use. */
+export const badRegionResponse = {
+  code: "RequestParameterIsWrong",
+  msg: "请求参数错误",
+  data: null,
+  request_id: "req-bad-region",
+};

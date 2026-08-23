@@ -115,6 +115,67 @@ a 2-hour TTL is applied unless you ask for longer, releasing requires an explici
 autodl ls --json | jq -r '.data[] | select(.status=="running") | .uuid'
 ```
 
+## Deploying a git project
+
+```bash
+# Rent a box, clone, auto-install dependencies, run it, then stop the instance
+autodl deploy owner/repo --gpu 4090 --start "python train.py" --ttl 4h
+
+# Long-running service: background it and keep the instance up
+autodl deploy owner/repo --gpu 4090 --start "python app.py" --detach
+
+# Come back later — powers the same box on and `git pull`s, no rebuild
+autodl deploy owner/repo --instance pro-76419909953e --start "python train.py"
+```
+
+`deploy` differs from `run` in one deliberate way: it **stops** the instance at the end
+instead of releasing it. A stopped instance keeps its disks, so the next deploy reuses
+the environment you already built. `--on-finish release` opts out.
+
+Code lands in `/root/autodl-tmp/<repo>` — the data disk. AutoDL's system disk is a fixed
+30GB that also gets packed into any saved image; the data disk is separate, faster and
+expandable. The trade-off worth knowing: **data-disk contents are not included when you
+save an image**, so put the environment on the system disk and the code here.
+
+Dependencies are auto-detected in this order, first hit wins — `environment.yml` →
+`requirements.txt` → `pyproject.toml` → `package-lock.json`/`package.json`. Override with
+`--setup "<cmd>"`, or skip with `--no-setup`.
+
+Remote commands run through a **login shell**. AutoDL images keep `python`, `pip` and
+`conda` in `/root/miniconda3/bin`, which only reaches `PATH` via the login profile — a
+plain non-interactive `ssh host "pip install ..."` exits 127. This applies to
+`autodl exec` too, so it behaves the way it does when you `autodl ssh` in by hand.
+
+Cloning from GitHub or HuggingFace automatically enables AutoDL's academic proxy
+(`source /etc/network_turbo`). Gitee is domestic and skips it. `--no-accel` disables it.
+AutoDL notes the proxy is "for academic use, with no stability guarantee".
+
+Private repos: `--git-token`, or `GIT_TOKEN` / `GITHUB_TOKEN` in the environment. The
+token never reaches a log line, an error message, `--json` output, or the checkout's
+stored git remote.
+
+## Checking GPU stock
+
+```bash
+autodl stock --gpu 4090        # where are the free cards
+autodl stock                   # everything, everywhere
+```
+
+**Read this table carefully — the numbers are less authoritative than they look.** They
+come from AutoDL's elastic-deployment stock endpoint, the only capacity API that exists,
+and it does not track Pro instance availability. Measured on 2026-08-23: it reported 140
+idle RTX 4090D in `westDC3` while creating a Pro instance there answered *"暂无库存"* —
+and the identical request with no region constraint succeeded, landing in `beijingDC2`.
+
+Two consequences, both baked into the tool:
+
+- **Creating an instance never narrows regions on its own.** Omitting `data_center_list`
+  gives AutoDL the widest choice, which empirically succeeds most often.
+- **Only two regions accept a Pro instance at all**: `westDC3` (西北B区) and `beijingDC2`
+  (北京B区). The other nine in the stock table are elastic-deployment only; passing one
+  to `--region` is rejected up front rather than failing later with AutoDL's opaque
+  "请求参数错误". The `可建Pro` column marks which is which.
+
 ## The cost guard
 
 **AutoDL bills purely on power state.** An instance that finished training an hour ago
@@ -189,6 +250,8 @@ stderr, so `autodl ... --json | jq` is always safe.
 | `exec <id> <cmd…>` | Run a command, stream output, propagate exit code |
 | `push` / `pull <id>` | SFTP transfer, recursive, respects ignore files |
 | `run <cmd…>` | Create → sync → run → fetch → power off |
+| `deploy <repo>` | Create → clone → install deps → start → **stop, keeping data** |
+| `stock [--gpu] [--region]` | Live GPU stock per region |
 | `guard ttl\|cancel\|idle\|list\|sweep` | Cost guards |
 | `image save <id> <name>` / `images` | Private image management |
 | `gpus` / `regions` | Catalogue lookup |
@@ -238,8 +301,10 @@ confusion:
 - **Pay-as-you-go only.** No daily/weekly/monthly plans and no renewal endpoint.
 - **Pro instances only.** The seven specs in `autodl gpus` — the cheaper standard
   instances aren't reachable through the open API.
-- **No stock query.** Creation is a blind attempt; when there's no capacity you get
-  exit code 6 and have to try another spec or region.
+- **No usable stock query for Pro.** The one capacity endpoint reports elastic-deployment
+  stock, which demonstrably does not match Pro availability (see above). Creation is
+  effectively a blind attempt; no capacity means exit code 6 and another spec to try.
+- **Only two regions accept a Pro instance**: `westDC3` and `beijingDC2`.
 - **No CPU-only boot.** `power_on` accepts `payload: "gpu"` only, so the ¥0.1/hr
   no-GPU mode isn't available.
 - **Identity verification required** before the API will respond at all.
@@ -252,6 +317,11 @@ confusion:
 - **`running` does not mean sshd is ready.** A freshly created instance reports `running`
   before it accepts connections. Connection attempts here are spaced out rather than
   fired back to back.
+- **A non-interactive SSH session has almost no PATH.** No python, pip or conda — they
+  live in `/root/miniconda3/bin` and arrive only through the login profile. Every remote
+  command here runs under `bash -lc` for that reason.
+- **Releasing requires a completed shutdown**, and a second `power_off` on an instance
+  that is already stopping is an error. Both are handled internally.
 
 Also worth knowing: **an instance left shut down for 15 consecutive days is released and
 its data wiped.**
@@ -268,7 +338,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 148 tests, no network access, no cost
+npm test            # 248 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```

@@ -60,9 +60,11 @@ describe("the MCP server", () => {
       [
         "autodl_account_info",
         "autodl_create_instance",
+        "autodl_deploy",
         "autodl_download",
         "autodl_exec",
         "autodl_get_instance",
+        "autodl_gpu_stock",
         "autodl_list_gpu_specs",
         "autodl_list_images",
         "autodl_list_instances",
@@ -95,6 +97,22 @@ describe("the MCP server", () => {
     const { tools } = await client.listTools();
     const get = tools.find((tool) => tool.name === "autodl_get_instance");
     expect(get?.description).toContain("不要缓存");
+  });
+
+  it("tells agents that deploy stops rather than releases the instance", async () => {
+    // This is the behavioural difference between deploy and run; if the description
+    // doesn't land it, a model will reach for the wrong tool.
+    const { tools } = await client.listTools();
+    const deploy = tools.find((tool) => tool.name === "autodl_deploy");
+    expect(deploy?.description).toContain("关机而不释放");
+    expect(deploy?.inputSchema.required).toContain("repo");
+  });
+
+  it("marks gpu_stock read-only and warns that it is advisory", async () => {
+    const { tools } = await client.listTools();
+    const stock = tools.find((tool) => tool.name === "autodl_gpu_stock");
+    expect(stock?.annotations?.readOnlyHint).toBe(true);
+    expect(stock?.description).toContain("仅供择优参考");
   });
 
   it("exposes the instances resource", async () => {

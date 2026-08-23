@@ -12,6 +12,7 @@ export type { Context, GlobalOptions } from "./context.js";
 export { createContext } from "./context.js";
 export type { BaseImage, GpuSpec, Region } from "./core/catalog.js";
 export {
+  assertStockRegion,
   BASE_IMAGES,
   DEFAULT_BASE_IMAGE,
   findBaseImage,
@@ -39,6 +40,8 @@ export {
   powerOnInstance,
   releaseInstance,
 } from "./core/endpoints/instance.js";
+export type { GpuStockEntry, StockQuery } from "./core/endpoints/machine.js";
+export { getRegionGpuStock } from "./core/endpoints/machine.js";
 export type { ErrorCode } from "./core/errors.js";
 export {
   AuthError,
@@ -53,6 +56,8 @@ export {
   UsageError,
 } from "./core/errors.js";
 export { estimateCost, formatRate, formatYuan, milliToYuan, yuanToMilli } from "./core/money.js";
+export type { ParsedRepo } from "./core/repo.js";
+export { parseRepo, redactCredentials, resolveGitToken, withCredentials } from "./core/repo.js";
 export type {
   Balance,
   Instance,
@@ -68,6 +73,13 @@ export {
   normalizeSnapshot,
   redactSnapshot,
 } from "./core/schemas.js";
+export type { RegionChoice, RegionStock, StockSnapshot } from "./core/stock.js";
+export {
+  chooseRegions,
+  findRegionsWithStock,
+  getStockByRegion,
+  specForStockName,
+} from "./core/stock.js";
 export type { WaitOptions } from "./core/waiters.js";
 export { waitForRunning, waitForShutdown, waitForStatus } from "./core/waiters.js";
 export { assertBudget, resolveMinBalance } from "./guard/budget.js";
@@ -90,5 +102,7 @@ export { execCommand, execOnConnection } from "./ssh/exec.js";
 export type { TransferOptions, TransferSummary } from "./ssh/transfer.js";
 export { pull, push } from "./ssh/transfer.js";
 export { VERSION } from "./version.js";
+export type { DeployOptions, DeployResult } from "./workflow/deploy.js";
+export { deployWorkflow } from "./workflow/deploy.js";
 export type { RunOptions, RunResult } from "./workflow/run.js";
 export { runWorkflow } from "./workflow/run.js";

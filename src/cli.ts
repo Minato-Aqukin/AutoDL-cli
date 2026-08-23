@@ -2,11 +2,13 @@ import { Command } from "commander";
 import { registerAccountCommands } from "./commands/account.js";
 import { registerAuthCommands } from "./commands/auth.js";
 import { registerCatalogCommands } from "./commands/catalog.js";
+import { registerDeployCommand } from "./commands/deploy.js";
 import { registerGuardCommands } from "./commands/guard.js";
 import { registerInstanceCommands } from "./commands/instances.js";
 import { registerMcpCommand } from "./commands/mcp.js";
 import { registerRunCommand } from "./commands/run.js";
 import { registerSSHCommands } from "./commands/ssh.js";
+import { registerStockCommand } from "./commands/stock.js";
 import { ExitCode, toAutoDLError } from "./core/errors.js";
 import { emitError } from "./output/format.js";
 import { VERSION } from "./version.js";
@@ -39,8 +41,10 @@ export function buildProgram(): Command {
   registerInstanceCommands(program);
   registerSSHCommands(program);
   registerRunCommand(program);
+  registerDeployCommand(program);
   registerGuardCommands(program);
   registerCatalogCommands(program);
+  registerStockCommand(program);
   registerMcpCommand(program);
 
   program.addHelpText(
@@ -56,7 +60,7 @@ export function buildProgram(): Command {
       "  autodl create --gpu 4090 --ttl 2h --wait        创建实例并等待就绪",
       "  autodl exec pro-xxx 'nvidia-smi'                远程执行命令",
       "  autodl run 'python train.py' --gpu 4090 \\",
-      "    --sync ./ --pull /root/autodl-cli/out          跑完自动关机",
+      "    --sync ./ --pull /root/autodl-tmp/autodl-cli/out   跑完自动关机",
       "  autodl ls --json | jq '.data[].uuid'            供脚本与 agent 消费",
       "",
       "接入 agent（Claude Code）：",

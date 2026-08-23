@@ -110,6 +110,61 @@ MCP 模式的默认值比 CLI 更严格，因为没有人在旁边盯着：不�
 autodl ls --json | jq -r '.data[] | select(.status=="running") | .uuid'
 ```
 
+## 部署 git 项目
+
+```bash
+# 开一台卡，拉代码、自动装依赖、跑起来，然后关机
+autodl deploy owner/repo --gpu 4090 --start "python train.py" --ttl 4h
+
+# 长驻服务：后台启动并保持实例运行
+autodl deploy owner/repo --gpu 4090 --start "python app.py" --detach
+
+# 过几天回来：同一台机器开机 + git pull，环境不用重建
+autodl deploy owner/repo --instance pro-76419909953e --start "python train.py"
+```
+
+`deploy` 和 `run` 只有一个刻意的区别：结束时**关机而不释放**。关机的实例磁盘完整保留，
+下次部署直接复用已经装好的环境。想释放用 `--on-finish release`。
+
+代码放在 `/root/autodl-tmp/<仓库名>`，也就是**数据盘**。AutoDL 的系统盘固定 30G 且会被打包进
+保存的镜像；数据盘独立、更快、可扩容。有个值得知道的取舍：**数据盘的内容保存镜像时不包含**，
+所以环境装系统盘、代码放数据盘才是对的组合。
+
+依赖按这个顺序自动探测，先命中先用：`environment.yml` → `requirements.txt` →
+`pyproject.toml` → `package-lock.json`/`package.json`。`--setup "<命令>"` 可完全覆盖，
+`--no-setup` 跳过。
+
+远程命令一律走**登录 shell**。AutoDL 镜像把 `python`、`pip`、`conda` 放在
+`/root/miniconda3/bin`，这个路径只有登录时的 profile 才会加进 `PATH`——直接
+`ssh host "pip install ..."` 会以退出码 127 失败。`autodl exec` 同样如此，
+因此它的行为和你手动 `autodl ssh` 进去敲命令一致。
+
+从 GitHub / HuggingFace 拉代码时会自动开启学术资源加速（`source /etc/network_turbo`）。
+Gitee 是境内的，不需要也不会开。`--no-accel` 可关闭。官方注明该加速「仅供学术用途、不保证稳定」。
+
+私有仓库用 `--git-token`，或设置 `GIT_TOKEN` / `GITHUB_TOKEN` 环境变量。凭证不会出现在
+日志、错误信息、`--json` 输出里，也不会留在实例内 git remote 的配置中。
+
+## 查 GPU 库存
+
+```bash
+autodl stock --gpu 4090        # 哪里有空闲卡
+autodl stock                   # 全部地区全部型号
+```
+
+**这张表要谨慎看——数字没有它看上去那么权威。** 它来自 AutoDL 的「弹性部署 GPU 库存」接口，
+这是唯一存在的容量接口，但它**不反映 Pro 实例的可用量**。2026-08-23 实测：接口显示
+`westDC3` 有 140 张空闲 RTX 4090D，而在该地区创建 Pro 实例返回*「暂无库存」*；同样的请求
+不带地区限制反而成功了，最终落在 `beijingDC2`。
+
+由此得出两个结论，都已经写进工具的行为里：
+
+- **创建实例时不会自作主张缩小地区范围。** 不传 `data_center_list` 让 AutoDL 自行调度，
+  实测成功率最高。
+- **只有两个地区能创建 Pro 实例**：`westDC3`（西北B区）和 `beijingDC2`（北京B区）。
+  库存表里另外 9 个地区只用于弹性部署，写进 `--region` 会被提前拒绝，而不是等到 AutoDL
+  回一句含糊的「请求参数错误」。表里的 `可建Pro` 列标明了这个区别。
+
 ## 成本护栏
 
 **AutoDL 只按开机时长计费，与是否使用 GPU 无关。** 一台一小时前就跑完训练的实例，
@@ -182,6 +237,8 @@ autodl guard idle pro-xxx --threshold 5 --samples 6 --interval 1m
 | `exec <id> <cmd…>` | 远程执行，流式输出，透传退出码 |
 | `push` / `pull <id>` | SFTP 传输，支持递归目录与忽略规则 |
 | `run <cmd…>` | 建实例 → 同步 → 执行 → 回传 → 关机 |
+| `deploy <仓库>` | 建实例 → 拉代码 → 装依赖 → 启动 → **关机保留数据** |
+| `stock [--gpu] [--region]` | 各地区 GPU 实时库存 |
 | `guard ttl\|cancel\|idle\|list\|sweep` | 成本护栏 |
 | `image save <id> <name>` / `images` | 私有镜像管理 |
 | `gpus` / `regions` | 查询内置目录 |
@@ -229,7 +286,9 @@ Go 的 `sql.NullTime` 结构会被拍平成 `string | null`。
 - **只支持按量计费。** 没有包日/包周/包月，也没有续费接口。
 - **只能创建 Pro 实例。** 即 `autodl gpus` 里那七个规格 —— 更便宜的标准实例
   官方开放 API 租不到。
-- **没有库存查询接口。** 创建只能盲试，无货时返回退出码 6，只能换规格或换地区重试。
+- **没有可用于 Pro 的库存查询接口。** 唯一的容量接口返回的是弹性部署库存，实测与 Pro 可用量
+  对不上（见上文）。创建实际上仍是盲试，无货时返回退出码 6，只能换规格重试。
+- **只有两个地区能创建 Pro 实例**：`westDC3` 和 `beijingDC2`。
 - **不支持无卡模式开机。** `power_on` 的 `payload` 只接受 `"gpu"`，
   ¥0.1/时 的无卡模式用不了。
 - **必须先完成实名认证**，否则 API 根本不响应。
@@ -239,6 +298,9 @@ Go 的 `sql.NullTime` 结构会被拍平成 `string | null`。
   旧值能用的次数足够多，多到足以把 bug 藏起来。本工具每次连接都重新拉取，所以你不用操心。
 - **状态变成 `running` 不代表 sshd 已经就绪。** 新建实例会在还不能接受连接时就报 `running`，
   所以本工具的连接重试之间是有退避间隔的，而不是连着打。
+- **非交互 SSH 会话几乎没有 PATH。** 没有 python、没有 pip、没有 conda——它们在
+  `/root/miniconda3/bin`，只有登录 profile 会加进来。所以这里所有远程命令都走 `bash -lc`。
+- **释放必须等关机真正完成**，而且对已经在关机中的实例再调一次关机会报错。两者都已在内部处理。
 
 另外值得注意：**实例连续关机 15 天会被平台释放，数据全部清空。**
 
@@ -254,7 +316,7 @@ GPU 规格、地区、公共基础镜像三张表是内置的静态数据，因�
 ```bash
 npm install
 npm run build
-npm test            # 148 个测试，不访问网络，不产生任何费用
+npm test            # 248 个测试，不访问网络，不产生任何费用
 npm run lint
 npm run typecheck
 ```

@@ -1,17 +1,23 @@
 import { mkdir } from "node:fs/promises";
 import { untrackInstance } from "../config/state.js";
 import {
+  assertProCreateRegion,
   DEFAULT_BASE_IMAGE,
   findBaseImage,
   parseCudaVersion,
   resolveGpuSpec,
-  resolveRegion,
 } from "../core/catalog.js";
 import type { AutoDLClient } from "../core/client.js";
 import { formatDuration } from "../core/duration.js";
-import { createInstance, powerOffInstance, releaseInstance } from "../core/endpoints/instance.js";
+import {
+  createInstance,
+  getInstanceStatus,
+  powerOffInstance,
+  releaseInstance,
+} from "../core/endpoints/instance.js";
 import { UsageError } from "../core/errors.js";
-import { waitForRunning } from "../core/waiters.js";
+import { chooseRegions } from "../core/stock.js";
+import { waitForRunning, waitForShutdown } from "../core/waiters.js";
 import { assertBudget } from "../guard/budget.js";
 import { composeStartCommand, recordTTL } from "../guard/ttl.js";
 import { debug, isJson, note, success, warn } from "../output/format.js";
@@ -43,6 +49,8 @@ export interface RunOptions {
   commandTimeoutMs?: number;
   minBalanceYuan?: number;
   env?: Record<string, string>;
+  /** Set false to skip the pre-create stock lookup. */
+  stockCheck?: boolean;
   signal?: AbortSignal;
 }
 
@@ -57,7 +65,15 @@ export interface RunResult {
   durationMs: number;
 }
 
-const DEFAULT_WORKDIR = "/root/autodl-cli";
+/**
+ * The data disk, not the system disk.
+ *
+ * `/root` is a fixed ~30GB system volume that also gets packed into any saved image;
+ * `/root/autodl-tmp` is a separate, faster, expandable disk. AutoDL's own docs point
+ * code and data here. Trade-off worth knowing: data-disk contents are NOT included
+ * when you save an image.
+ */
+const DEFAULT_WORKDIR = "/root/autodl-tmp/autodl-cli";
 
 /**
  * The single verb an agent reaches for: rent a box, put code on it, run something,
@@ -82,20 +98,17 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
     ? parseCudaVersion(options.cudaFrom)
     : parseCudaVersion(image?.cuda ?? "11.8");
 
-  const regions = (options.regions ?? []).map((input) => {
-    const region = resolveRegion(input);
-    if (!region) {
-      throw new UsageError(`未知的地区 "${input}"`, {
-        hint: "运行 `autodl regions` 查看地区列表。",
-      });
-    }
-    return region.id;
-  });
+  const requestedRegions = (options.regions ?? []).map((input) => assertProCreateRegion(input).id);
 
   const workdir = options.workdir ?? DEFAULT_WORKDIR;
   const onFinish = options.onFinish ?? "poweroff";
 
   await assertBudget(client, options.minBalanceYuan);
+
+  const regions =
+    options.stockCheck === false
+      ? requestedRegions
+      : (await chooseRegions(client, spec, requestedRegions)).regions;
 
   // Arm the shutdown timer at boot so the instance protects itself even if this
   // process dies before it can do anything else.
@@ -200,7 +213,11 @@ async function finish(
 
   note(t("run.cleanup"));
   try {
-    await powerOffInstance(client, uuid);
+    // Skip the call if AutoDL is already stopping it; a duplicate is rejected.
+    const status = await getInstanceStatus(client, uuid).catch(() => "unknown");
+    if (status !== "shutdown" && status !== "shutting_down") {
+      await powerOffInstance(client, uuid);
+    }
     success(`实例 ${uuid} 已关机，计费已停止`);
   } catch (err) {
     warn(`自动关机失败：${(err as Error).message}`);
@@ -210,11 +227,12 @@ async function finish(
 
   if (action === "release") {
     try {
+      // AutoDL rejects a release until the instance has finished shutting down.
+      await waitForShutdown(client, uuid, { timeoutMs: 10 * 60_000 });
       await releaseInstance(client, uuid);
       untrackInstance(uuid);
       success(`实例 ${uuid} 已释放`);
     } catch (err) {
-      // Release right after power-off often races AutoDL's own state machine.
       warn(`释放失败（实例已关机，不再计费）：${(err as Error).message}`);
       warn(`稍后可重试：autodl rm ${uuid} --yes`);
     }

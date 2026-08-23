@@ -6,7 +6,7 @@ import {
   powerOnInstance,
 } from "../core/endpoints/instance.js";
 import { AutoDLError, SSHError } from "../core/errors.js";
-import { waitForRunning } from "../core/waiters.js";
+import { waitForRunning, waitForShutdown } from "../core/waiters.js";
 import { debug, note } from "../output/format.js";
 import { t } from "../output/i18n.js";
 
@@ -51,6 +51,17 @@ export async function getCredentials(
         details: { status },
       });
     }
+    // A mid-shutdown instance can't be powered on yet, and waiting for `running`
+    // directly would hang until the timeout. Let it settle first.
+    if (status === "shutting_down") {
+      note("实例正在关机中，等待关机完成后再开机…");
+      status = await waitForShutdown(client, uuid, {
+        ...(options.waitTimeoutMs !== undefined ? { timeoutMs: options.waitTimeoutMs } : {}),
+        ...(options.pollIntervalMs !== undefined ? { intervalMs: options.pollIntervalMs } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    }
+
     if (status === "shutdown") {
       note(t("instance.poweringOn"));
       await powerOnInstance(client, uuid);

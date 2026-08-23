@@ -12,9 +12,11 @@ import {
 import { NotFoundError, UsageError } from "../../src/core/errors.js";
 import { mockFetch } from "../fixtures/mock-fetch.js";
 import {
+  badRegionResponse,
   createResponse,
   emptySuccess,
   instanceListResponse,
+  noStockResponse,
   sampleInstanceRaw,
   snapshotResponse,
 } from "../fixtures/responses.js";
@@ -167,6 +169,24 @@ describe("power operations", () => {
     const fetchMock = mockFetch([{ path: RELEASE, status: 500, response: {} }]);
     await expect(releaseInstance(client(fetchMock.impl), "pro-1")).rejects.toThrow();
     expect(fetchMock.calls).toHaveLength(1);
+  });
+});
+
+describe("real API error replies", () => {
+  it("does not retry a rejected region — it will never start working", async () => {
+    const fetchMock = mockFetch([{ path: CREATE, response: badRegionResponse }]);
+    await expect(createInstance(client(fetchMock.impl), validInput)).rejects.toThrow(
+      /请求参数错误/,
+    );
+    expect(fetchMock.calls).toHaveLength(1);
+  });
+
+  it("surfaces no-stock with the hint that the API cannot query capacity", async () => {
+    const fetchMock = mockFetch([{ path: CREATE, response: noStockResponse }]);
+    await expect(createInstance(client(fetchMock.impl), validInput)).rejects.toMatchObject({
+      code: "NO_STOCK",
+      exitCode: 6,
+    });
   });
 });
 
