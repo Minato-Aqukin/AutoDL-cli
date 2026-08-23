@@ -49,8 +49,9 @@ being saved, and you land on the dashboard. Once configured, `autodl` goes strai
 
 A live table of your instances: status, GPU, region, **how long each has been powered on
 and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
-detail, `s` start, `x` stop, `c` copy the SSH command, `D` release, `g` GPU stock, `n` new
-instance, `r` refresh, `q` quit.
+detail, `s` start, `x` stop, `c` show the SSH command, `Ctrl+D` release, `g` GPU stock,
+`n` new instance, `r` refresh, `q` quit. Release sits on Ctrl+D rather than a bare key
+because it wipes the instance permanently.
 
 It runs on the terminal's alternate screen, so it owns a fixed canvas instead of
 scrolling below whatever was already there, and quitting restores your prompt and
@@ -375,7 +376,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 305 tests, no network access, no cost
+npm test            # 310 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```

@@ -38,9 +38,9 @@ const SCREEN_TITLES: Record<View, string> = {
 type Pending = { kind: "release"; row: DashboardRow } | null;
 
 const DASHBOARD_KEYS =
-  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · c 复制SSH · D 释放 · g 库存 · n 新建 · r 刷新 · ? 帮助 · q 退出";
+  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · c 显示SSH · Ctrl+D 释放 · g 库存 · n 新建 · r 刷新 · ? 帮助 · q 退出";
 
-function App({ client }: { client: AutoDLClient }): React.ReactElement {
+export function App({ client }: { client: AutoDLClient }): React.ReactElement {
   const { exit } = useApp();
   const [view, setView] = useState<View>("dashboard");
   const [selected, setSelected] = useState(0);
@@ -197,7 +197,7 @@ function App({ client }: { client: AutoDLClient }): React.ReactElement {
           `${snapshot.ssh.command ?? `ssh -p ${snapshot.ssh.port} root@${snapshot.ssh.host}`}　密码 ${snapshot.ssh.password}`,
         );
       }
-      if (input === "D") return setPending({ kind: "release", row });
+      if (key.ctrl && input === "d") return setPending({ kind: "release", row });
     },
     { isActive: view !== "create" && pending === null },
   );

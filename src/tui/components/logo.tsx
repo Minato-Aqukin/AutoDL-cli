@@ -5,30 +5,58 @@ import { VERSION } from "../../version.js";
 /**
  * The wordmark shown above every screen.
  *
- * Drawn with half-block characters, which every modern terminal renders at single
- * width — unlike box-drawing art, this stays aligned in CJK-configured terminals where
- * ambiguous-width glyphs are doubled.
+ * Drawn as a pixel font on a blue badge, echoing AutoDL's own white-on-blue mark. Every
+ * glyph comes from the Block Elements range, which terminals render at single width —
+ * unlike box-drawing or ambiguous-width art, this stays aligned in CJK-configured
+ * terminals where such characters get doubled.
+ *
+ * All lines in a block are padded to equal length so the background colour forms a
+ * clean rectangle rather than a ragged one.
  */
-const BANNER = ["▄▀█ █ █ ▀█▀ █▀█ █▀▄ █", "█▀█ █▄█  █  █▄█ █▄▀ █▄▄"];
 
-/** Below this the banner would wrap and look worse than plain text. */
-const MIN_COLUMNS = 46;
+/**
+ * The swirl, echoing AutoDL's own mark.
+ *
+ * Only the swirl is drawn: the blue background *is* the badge, so outlining a square
+ * here would paint a white box the official mark does not have.
+ */
+const ICON = ["  ▄▄▄  ", " ▟▀▀▀▘ ", " ▙▄▄▖  ", " ▝▀▀▜▌ ", "  ▀▀▀  "];
+
+/** AUTODL on a 5-pixel grid, one terminal cell per pixel. */
+const WORDMARK = [
+  " ███  █   █ █████  ███  ████  █     ",
+  "█   █ █   █   █   █   █ █   █ █     ",
+  "█████ █   █   █   █   █ █   █ █     ",
+  "█   █ █   █   █   █   █ █   █ █     ",
+  "█   █  ███    █    ███  ████  █████ ",
+];
+
+/** Width of the badge plus the wordmark, before the frame and padding. */
+const ART_COLUMNS = 7 + 1 + 36;
+
+/** Below this the art would wrap, which looks worse than plain text. */
+const MIN_COLUMNS = ART_COLUMNS + 12;
 
 interface LogoProps {
   /** Current screen, shown beside the wordmark. */
   subtitle: string;
 }
 
+function padded(lines: string[]): string[] {
+  const width = Math.max(...lines.map((line) => line.length));
+  return lines.map((line) => line.padEnd(width, " "));
+}
+
 export function Logo({ subtitle }: LogoProps): React.ReactElement {
   const { stdout } = useStdout();
-  // `||` rather than `??`: some terminals (and pty wrappers) report 0 columns, and
+  // `||` rather than `??`: some terminals and pty wrappers report 0 columns, and
   // nullish coalescing would let that through as a genuine width.
   const columns = stdout?.columns || 80;
 
   if (columns < MIN_COLUMNS) {
     return (
-      <Box paddingX={1}>
-        <Text bold color="cyan">
+      <Box borderStyle="round" borderColor="blue" paddingX={1}>
+        <Text bold color="blue">
           AutoDL
         </Text>
         <Text dimColor> · {subtitle}</Text>
@@ -36,18 +64,20 @@ export function Logo({ subtitle }: LogoProps): React.ReactElement {
     );
   }
 
+  const art = padded([...ICON.map((line, i) => line + WORDMARK[i])]);
+
   return (
-    <Box paddingX={1}>
+    <Box borderStyle="round" borderColor="blue" paddingX={1}>
       <Box flexDirection="column">
-        {BANNER.map((line) => (
-          <Text key={line} color="cyan" bold>
+        {art.map((line) => (
+          <Text key={line} color="white" backgroundColor="blue">
             {line}
           </Text>
         ))}
       </Box>
       <Box flexDirection="column" marginLeft={2} justifyContent="flex-end">
         <Text dimColor>v{VERSION} · 非官方</Text>
-        <Text>{subtitle}</Text>
+        <Text bold>{subtitle}</Text>
       </Box>
     </Box>
   );
