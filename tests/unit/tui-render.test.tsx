@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GPU_SPECS } from "../../src/core/catalog.js";
 import { stringWidth } from "../../src/output/format.js";
 import { Confirm } from "../../src/tui/components/confirm.js";
+import { Header } from "../../src/tui/components/header.js";
 import { StatusBar } from "../../src/tui/components/statusbar.js";
 import type { DashboardRow } from "../../src/tui/data.js";
 import { equivalentCommand } from "../../src/tui/screens/create.js";
@@ -297,5 +298,104 @@ describe("create wizard", () => {
     expect(equivalentCommand({ spec, imageUuid: "base-image-other", ttlSeconds: 1800 })).toContain(
       "--image base-image-other",
     );
+  });
+});
+
+describe("Header account panel", () => {
+  const identity = { uid: 785976, uuid: "3c9c106f", tenant: "autodl" };
+  const balance = { balanceYuan: 404.87, accumulatedYuan: 95.13, voucherYuan: 12.5 };
+
+  it("shows the account id and balance", () => {
+    const out = plain(
+      render(
+        <Header
+          subtitle="实例看板"
+          identity={identity}
+          balance={balance}
+          balanceError={null}
+          columns={100}
+        />,
+      ).lastFrame(),
+    );
+    expect(out).toContain("785976");
+    expect(out).toContain("¥404.87");
+    expect(out).toContain("¥95.13");
+  });
+
+  it("shows vouchers only when there are any", () => {
+    const withVoucher = plain(
+      render(
+        <Header
+          subtitle="x"
+          identity={identity}
+          balance={balance}
+          balanceError={null}
+          columns={100}
+        />,
+      ).lastFrame(),
+    );
+    expect(withVoucher).toContain("¥12.50");
+
+    const without = plain(
+      render(
+        <Header
+          subtitle="x"
+          identity={identity}
+          balance={{ ...balance, voucherYuan: 0 }}
+          balanceError={null}
+          columns={100}
+        />,
+      ).lastFrame(),
+    );
+    expect(without).not.toContain("+券");
+  });
+
+  it("says the balance failed rather than showing a stale or zero figure", () => {
+    const out = plain(
+      render(
+        <Header
+          subtitle="x"
+          identity={identity}
+          balance={null}
+          balanceError="网络超时"
+          columns={100}
+        />,
+      ).lastFrame(),
+    );
+    expect(out).toContain("余额获取失败");
+    expect(out).not.toContain("¥0.00");
+  });
+
+  it("falls back to a compact header on a narrow terminal", () => {
+    const out = plain(
+      render(
+        <Header
+          subtitle="实例看板"
+          identity={identity}
+          balance={balance}
+          balanceError={null}
+          columns={50}
+        />,
+      ).lastFrame(),
+    );
+    // Plain wordmark, no pixel art, but the balance still gets through.
+    expect(out).toContain("AutoDL");
+    expect(out).not.toContain("███");
+    expect(out).toContain("¥404.87");
+  });
+
+  it("shows a dash when the token carries no account id", () => {
+    const out = plain(
+      render(
+        <Header
+          subtitle="x"
+          identity={{ uid: null, uuid: null, tenant: null }}
+          balance={balance}
+          balanceError={null}
+          columns={100}
+        />,
+      ).lastFrame(),
+    );
+    expect(out).toContain("账号 —");
   });
 });

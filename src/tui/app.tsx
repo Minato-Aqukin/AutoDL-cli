@@ -1,17 +1,20 @@
 import { Box, render, Text, useApp, useInput } from "ink";
 import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { resolveBaseUrl, tryResolveToken, updateConfig } from "../config/store.js";
 import { parseCudaVersion } from "../core/catalog.js";
 import { AutoDLClient } from "../core/client.js";
 import { getBalance } from "../core/endpoints/account.js";
 import { createInstance } from "../core/endpoints/instance.js";
+import type { Balance } from "../core/schemas.js";
 import type { StockSnapshot } from "../core/stock.js";
 import { getStockByRegion } from "../core/stock.js";
 import { composeStartCommand, recordTTL } from "../guard/ttl.js";
 import { configureOutput, isJson, isVerbose } from "../output/format.js";
+import { identityFromToken } from "./account.js";
+import { copyToClipboard } from "./clipboard.js";
 import { Confirm } from "./components/confirm.js";
-import { Logo } from "./components/logo.js";
+import { Header } from "./components/header.js";
 import { StatusBar } from "./components/statusbar.js";
 import {
   type DashboardRow,
@@ -25,6 +28,7 @@ import { Dashboard } from "./screens/dashboard.js";
 import { Detail } from "./screens/detail.js";
 import { Login } from "./screens/login.js";
 import { StockScreen, toStockRows } from "./screens/stock.js";
+import { useTerminalSize } from "./useTerminalSize.js";
 
 type View = "dashboard" | "detail" | "stock" | "create" | "help";
 
@@ -38,9 +42,15 @@ const SCREEN_TITLES: Record<View, string> = {
 type Pending = { kind: "release"; row: DashboardRow } | null;
 
 const DASHBOARD_KEYS =
-  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · c 显示SSH · Ctrl+D 释放 · g 库存 · n 新建 · r 刷新 · ? 帮助 · q 退出";
+  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · c 复制SSH · Ctrl+D 释放 · g 库存 · n 新建 · r 刷新 · ? 帮助 · q 退出";
 
-export function App({ client }: { client: AutoDLClient }): React.ReactElement {
+export function App({
+  client,
+  token,
+}: {
+  client: AutoDLClient;
+  token: string;
+}): React.ReactElement {
   const { exit } = useApp();
   const [view, setView] = useState<View>("dashboard");
   const [selected, setSelected] = useState(0);
@@ -51,6 +61,10 @@ export function App({ client }: { client: AutoDLClient }): React.ReactElement {
   const [stock, setStock] = useState<StockSnapshot[]>([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockIndex, setStockIndex] = useState(0);
+  const [balance, setBalance] = useState<Balance | null>(null);
+  const [balanceError, setBalanceError] = useState<string | null>(null);
+  const { columns, rows: terminalRows } = useTerminalSize();
+  const identity = useMemo(() => identityFromToken(token), [token]);
 
   // Polling pauses whenever a modal owns the screen, so a refresh can't reorder rows
   // under a confirmation the user is reading.
@@ -69,6 +83,30 @@ export function App({ client }: { client: AutoDLClient }): React.ReactElement {
       loadSnapshot(row.instance.uuid);
     }
   }, [row, snapshotFor, loadSnapshot]);
+
+  // Balance is the number that changes behaviour, so it refreshes on its own cadence —
+  // slower than the instance list, since it moves far less often.
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      getBalance(client)
+        .then((next) => {
+          if (!cancelled) {
+            setBalance(next);
+            setBalanceError(null);
+          }
+        })
+        .catch((err: Error) => {
+          if (!cancelled) setBalanceError(err.message);
+        });
+    };
+    load();
+    const timer = setInterval(load, 60_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [client]);
 
   const flash = useCallback((message: string) => {
     setNotice(message);
@@ -193,9 +231,18 @@ export function App({ client }: { client: AutoDLClient }): React.ReactElement {
         if (!snapshot?.ssh.host || !snapshot.ssh.port) {
           return flash("实例未运行或 SSH 信息尚未就绪");
         }
-        return flash(
-          `${snapshot.ssh.command ?? `ssh -p ${snapshot.ssh.port} root@${snapshot.ssh.host}`}　密码 ${snapshot.ssh.password}`,
-        );
+        const command =
+          snapshot.ssh.command ?? `ssh -p ${snapshot.ssh.port} root@${snapshot.ssh.host}`;
+        void copyToClipboard(command).then((result) => {
+          // The password is shown but never copied: the clipboard is readable by any
+          // process, and a root password does not belong there.
+          flash(
+            result.method === "native"
+              ? `✔ 已复制：${command}　密码 ${snapshot.ssh.password}`
+              : `${command}　密码 ${snapshot.ssh.password}　（${result.note}）`,
+          );
+        });
+        return;
       }
       if (key.ctrl && input === "d") return setPending({ kind: "release", row });
     },
@@ -203,8 +250,16 @@ export function App({ client }: { client: AutoDLClient }): React.ReactElement {
   );
 
   return (
-    <Box flexDirection="column" paddingY={1}>
-      <Logo subtitle={SCREEN_TITLES[view]} />
+    // Claim the entire terminal so the dashboard is a fixed full-screen surface rather
+    // than a block that grows and shrinks with its content.
+    <Box flexDirection="column" height={terminalRows} width={columns}>
+      <Header
+        subtitle={SCREEN_TITLES[view]}
+        identity={identity}
+        balance={balance}
+        balanceError={balanceError}
+        columns={columns}
+      />
 
       {pending ? (
         <Confirm
@@ -242,6 +297,8 @@ export function App({ client }: { client: AutoDLClient }): React.ReactElement {
         <Dashboard rows={rows} selectedIndex={selected} loading={loading} />
       )}
 
+      <Box flexGrow={1} />
+
       <StatusBar
         rows={rows}
         error={error}
@@ -270,13 +327,14 @@ export function App({ client }: { client: AutoDLClient }): React.ReactElement {
  */
 function Root({ globals }: { globals: TuiGlobals }): React.ReactElement {
   const { exit } = useApp();
-  const [client, setClient] = useState<AutoDLClient | null>(() => {
+  const [session, setSession] = useState<{ client: AutoDLClient; token: string } | null>(() => {
     const resolved = tryResolveToken(globals.token);
     if (!resolved) return null;
-    return new AutoDLClient({
+    const baseUrl = resolveBaseUrl(globals.baseUrl);
+    return {
+      client: new AutoDLClient({ token: resolved.token, ...(baseUrl ? { baseUrl } : {}) }),
       token: resolved.token,
-      ...(resolveBaseUrl(globals.baseUrl) ? { baseUrl: resolveBaseUrl(globals.baseUrl) } : {}),
-    });
+    };
   });
   const [error, setError] = useState<string | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -292,7 +350,7 @@ function Root({ globals }: { globals: TuiGlobals }): React.ReactElement {
       getBalance(candidate)
         .then(() => {
           updateConfig({ token });
-          setClient(candidate);
+          setSession({ client: candidate, token });
         })
         .catch((err: Error) => setError(err.message))
         .finally(() => setVerifying(false));
@@ -300,10 +358,10 @@ function Root({ globals }: { globals: TuiGlobals }): React.ReactElement {
     [globals.baseUrl],
   );
 
-  if (!client) {
+  if (!session) {
     return <Login onSubmit={submit} onQuit={exit} error={error} verifying={verifying} />;
   }
-  return <App client={client} />;
+  return <App client={session.client} token={session.token} />;
 }
 
 export interface TuiGlobals {

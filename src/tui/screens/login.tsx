@@ -2,7 +2,8 @@ import { Box, Text, useInput } from "ink";
 import type React from "react";
 import { useState } from "react";
 import { configPath } from "../../config/store.js";
-import { Logo } from "../components/logo.js";
+import { BrandMark } from "../components/header.js";
+import { useTerminalSize } from "../useTerminalSize.js";
 
 /**
  * Token entry, shown when the TUI starts without credentials.
@@ -33,6 +34,7 @@ function sanitize(input: string): string {
 }
 
 export function Login({ onSubmit, onQuit, error, verifying }: LoginProps): React.ReactElement {
+  const { columns, rows } = useTerminalSize();
   const [stage, setStage] = useState<Stage>("menu");
   const [choice, setChoice] = useState(0);
   const [token, setToken] = useState("");
@@ -74,8 +76,8 @@ export function Login({ onSubmit, onQuit, error, verifying }: LoginProps): React
   });
 
   return (
-    <Box flexDirection="column">
-      <Logo subtitle="登入" />
+    <Box flexDirection="column" height={rows} width={columns}>
+      <BrandMark subtitle="登入" columns={columns} />
       <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
         {stage === "menu" ? (
           <Box flexDirection="column" marginTop={1}>

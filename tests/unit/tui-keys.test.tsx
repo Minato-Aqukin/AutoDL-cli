@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { render } from "ink-testing-library";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DashboardRow } from "../../src/tui/data.js";
@@ -65,6 +66,12 @@ const CTRL_D = String.fromCharCode(4);
 const flush = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 const client = {} as never;
+// A syntactically valid JWT so the header can decode an account id from it.
+const TOKEN = [
+  "header",
+  Buffer.from(JSON.stringify({ uid: 785976 })).toString("base64url"),
+  "sig",
+].join(".");
 
 beforeEach(() => {
   destroy.mockReset();
@@ -72,7 +79,7 @@ beforeEach(() => {
 
 describe("release binding", () => {
   it("opens the confirmation on Ctrl+D", async () => {
-    const { stdin, lastFrame } = render(<App client={client} />);
+    const { stdin, lastFrame } = render(<App client={client} token={TOKEN} />);
     await flush();
     stdin.write(CTRL_D);
     await flush();
@@ -81,7 +88,7 @@ describe("release binding", () => {
 
   it("does nothing on a plain capital D", async () => {
     // The old binding. A shift-slip must not put a wipe-everything prompt on screen.
-    const { stdin, lastFrame } = render(<App client={client} />);
+    const { stdin, lastFrame } = render(<App client={client} token={TOKEN} />);
     await flush();
     stdin.write("D");
     await flush();
@@ -89,7 +96,7 @@ describe("release binding", () => {
   });
 
   it("does nothing on a plain lowercase d", async () => {
-    const { stdin, lastFrame } = render(<App client={client} />);
+    const { stdin, lastFrame } = render(<App client={client} token={TOKEN} />);
     await flush();
     stdin.write("d");
     await flush();
@@ -97,7 +104,7 @@ describe("release binding", () => {
   });
 
   it("still requires a confirmation before releasing anything", async () => {
-    const { stdin } = render(<App client={client} />);
+    const { stdin } = render(<App client={client} token={TOKEN} />);
     await flush();
     stdin.write(CTRL_D);
     await flush();
@@ -105,7 +112,7 @@ describe("release binding", () => {
   });
 
   it("advertises Ctrl+D rather than D in the key hints", async () => {
-    const { lastFrame } = render(<App client={client} />);
+    const { lastFrame } = render(<App client={client} token={TOKEN} />);
     await flush();
     const out = plain(lastFrame());
     expect(out).toContain("Ctrl+D 释放");
