@@ -128,12 +128,20 @@ export async function findInstance(client: AutoDLClient, uuid: string): Promise<
 
 export interface PowerOnOptions {
   /**
-   * `payload` is fixed to "gpu" because nothing else works.
+   * `payload` is fixed to "gpu" because nothing else works — for now.
    *
-   * Probed live 2026-08-24 on a shut-down instance: "cpu", "no_gpu", "nogpu",
-   * "cpu_only", "cpu-only" and "none" every one returned `不支持的启动模式`, and an
-   * empty string was accepted but came back with `start_mode: "gpu"`. AutoDL's ¥0.1/hr
-   * 无卡模式 is console-only, so there is no option to expose here.
+   * AutoDL documents it as "gpu：有卡开机, 暂不支持API以无卡模式开机": *not yet*
+   * supported, not never. Probed live 2026-08-24 on a shut-down instance: "cpu",
+   * "no_gpu", "nogpu", "cpu_only", "cpu-only" and "none" each returned
+   * `不支持的启动模式`, and an empty string was accepted but came back with
+   * `start_mode: "gpu"` — a default, not a CPU mode.
+   *
+   * When AutoDL enables it, the change is small: add `mode?: "gpu" | "<their value>"`
+   * to PowerOnOptions, thread it into the payload below, and surface it as
+   * `autodl start --no-gpu` plus a `mode` field on the MCP power-on tool.
+   *
+   * Re-checking costs nothing: from any already shut-down instance, a power_on with a
+   * rejected payload is refused without booting anything.
    */
   startCommand?: string;
 }
