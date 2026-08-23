@@ -305,8 +305,10 @@ confusion:
   stock, which demonstrably does not match Pro availability (see above). Creation is
   effectively a blind attempt; no capacity means exit code 6 and another spec to try.
 - **Only two regions accept a Pro instance**: `westDC3` and `beijingDC2`.
-- **No CPU-only boot.** `power_on` accepts `payload: "gpu"` only, so the ¥0.1/hr
-  no-GPU mode isn't available.
+- **No CPU-only boot.** The ¥0.1/hr 无卡模式 is not reachable. Probed on a live instance
+  2026-08-24: `cpu`, `no_gpu`, `nogpu`, `cpu_only`, `cpu-only` and `none` all return
+  `ServerError | 不支持的启动模式`, and an empty `payload` is accepted but boots with the
+  GPU attached (`start_mode: "gpu"`). Use the web console if you need it.
 - **Identity verification required** before the API will respond at all.
 - **Missing operations:** rename, scheduled shutdown, resizing, migration, system reset.
 - **SSH credentials can change on any power cycle** — port *and* root password. AutoDL

@@ -128,6 +128,21 @@ export async function sweepExpired(client: AutoDLClient): Promise<SweepResult> {
       const status = await getInstanceStatus(client, entry.uuid);
       if (status === "running" || status === "starting") {
         await powerOffInstance(client, entry.uuid);
+
+        // Confirm it actually took. A power_off issued while the instance is still
+        // coming up was observed not to take effect, and untracking on an unverified
+        // call would drop the entry and let the instance bill indefinitely — the exact
+        // outcome this guard exists to prevent. Leaving it tracked costs one status
+        // call on the next command; dropping it costs money.
+        const after = await getInstanceStatus(client, entry.uuid).catch(() => status);
+        if (after === "running" || after === "starting") {
+          result.failed.push({ uuid: entry.uuid, reason: `关机未生效（状态仍为 ${after}）` });
+          warn(
+            `${entry.name ?? entry.uuid} 关机未生效（状态 ${after}），保留在台账中，下次命令会重试`,
+          );
+          continue;
+        }
+
         result.stopped.push(entry.uuid);
         warn(
           `${t("guard.sweptOne")}：${entry.name ?? entry.uuid}（TTL ${formatDuration(entry.ttlSeconds)}）`,

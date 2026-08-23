@@ -127,7 +127,14 @@ export async function findInstance(client: AutoDLClient, uuid: string): Promise<
 }
 
 export interface PowerOnOptions {
-  /** AutoDL only accepts "gpu" here — no CPU-only (无卡) boot via the open API. */
+  /**
+   * `payload` is fixed to "gpu" because nothing else works.
+   *
+   * Probed live 2026-08-24 on a shut-down instance: "cpu", "no_gpu", "nogpu",
+   * "cpu_only", "cpu-only" and "none" every one returned `不支持的启动模式`, and an
+   * empty string was accepted but came back with `start_mode: "gpu"`. AutoDL's ¥0.1/hr
+   * 无卡模式 is console-only, so there is no option to expose here.
+   */
   startCommand?: string;
 }
 

@@ -107,7 +107,15 @@ describe("the TTL sweep", () => {
     });
 
     const fetchMock = mockFetch([
-      { path: STATUS, response: { code: "Success", msg: "", data: "running" } },
+      // running (decide) → shutdown (verify the power_off landed)
+      {
+        path: STATUS,
+        response: (_call, index) => ({
+          code: "Success",
+          msg: "",
+          data: index === 0 ? "running" : "shutdown",
+        }),
+      },
       { path: POWER_OFF, response: { code: "Success", msg: "", data: null } },
     ]);
 
@@ -131,6 +139,33 @@ describe("the TTL sweep", () => {
 
     expect(result.stopped).toEqual([]);
     expect(fetchMock.calls).toHaveLength(0);
+  });
+
+  it("keeps tracking an instance whose power_off did not take effect", async () => {
+    // Observed live: a power_off issued while an instance was still coming up left it
+    // running. Untracking on an unverified call would drop the entry and let the
+    // instance bill indefinitely — exactly what this guard exists to prevent.
+    const { trackInstance, listTracked } = await state();
+    const { sweepExpired } = await guard();
+    trackInstance({
+      uuid: "pro-stubborn",
+      ttlSeconds: 1,
+      expiresAt: Date.now() - 1000,
+      createdAt: Date.now() - 2000,
+      inInstanceTimer: false,
+    });
+
+    const fetchMock = mockFetch([
+      // Still running on the verification check that follows power_off.
+      { path: STATUS, response: { code: "Success", msg: "", data: "running" } },
+      { path: POWER_OFF, response: { code: "Success", msg: "", data: null } },
+    ]);
+    const result = await sweepExpired(client(fetchMock.impl));
+
+    expect(result.stopped).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    // Still on the books, so the next command retries it.
+    expect(listTracked().map((e) => e.uuid)).toEqual(["pro-stubborn"]);
   });
 
   it("does not call power_off on an instance that is already shut down", async () => {

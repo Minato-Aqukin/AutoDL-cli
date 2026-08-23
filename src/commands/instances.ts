@@ -341,9 +341,22 @@ export function registerInstanceCommands(program: Command): void {
       action(async (context, id: string) => {
         note(t("instance.poweringOff"));
         await powerOffInstance(context.client, id);
-        untrackInstance(id);
-        emit({ uuid: id, stopped: true }, () => success(`实例 ${id} 已关机，计费已停止`));
-        return 0;
+
+        // Verify rather than assume: an instance that was still coming up was observed
+        // to stay running after a power_off, and "已关机，计费已停止" would then be a
+        // claim the user acts on — by walking away while the meter runs.
+        const after = await getInstanceStatus(context.client, id).catch(() => "unknown");
+        const stopped = after !== "running" && after !== "starting";
+        if (stopped) untrackInstance(id);
+
+        emit({ uuid: id, stopped, status: after }, () => {
+          if (stopped) success(`实例 ${id} 已关机，计费已停止`);
+          else
+            warn(
+              `关机指令已发送，但实例状态仍为 ${after}。实例可能仍在启动中，稍后请用 \`autodl ls\` 确认，必要时重试 \`autodl stop ${id}\`。`,
+            );
+        });
+        return stopped ? 0 : 1;
       }),
     );
 
