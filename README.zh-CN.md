@@ -39,6 +39,9 @@ npx @minatoaqukin/autodl-cli <command>    # 或者不安装直接用
 autodl tui     # 交互式终端里直接敲 autodl 也进
 ```
 
+还没配置 Token 的机器上，它会先进登录页，给两个选项——配置 Token 登入，或退出。
+粘贴 Token 后会先向 API 验证再保存，然后直接进看板。已经配置过的，敲 `autodl` 直接进。
+
 一张会自己刷新的实例表：状态、GPU、地区、**已开机多久、大概花了多少钱**、TTL 还剩多少。
 快捷键：`↑↓` 移动、`Enter` 详情、`s` 开机、`x` 关机、`c` 复制 SSH 命令、`D` 释放、
 `g` 看 GPU 库存、`n` 新建、`r` 刷新、`q` 退出。
@@ -341,7 +344,7 @@ GPU 规格、地区、公共基础镜像三张表是内置的静态数据，因�
 ```bash
 npm install
 npm run build
-npm test            # 285 个测试，不访问网络，不产生任何费用
+npm test            # 299 个测试，不访问网络，不产生任何费用
 npm run lint
 npm run typecheck
 ```

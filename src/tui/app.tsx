@@ -1,8 +1,10 @@
 import { Box, render, Text, useApp, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
+import { resolveBaseUrl, tryResolveToken, updateConfig } from "../config/store.js";
 import { parseCudaVersion } from "../core/catalog.js";
-import type { AutoDLClient } from "../core/client.js";
+import { AutoDLClient } from "../core/client.js";
+import { getBalance } from "../core/endpoints/account.js";
 import { createInstance } from "../core/endpoints/instance.js";
 import type { StockSnapshot } from "../core/stock.js";
 import { getStockByRegion } from "../core/stock.js";
@@ -20,6 +22,7 @@ import {
 import { type CreateDraft, CreateWizard, equivalentCommand } from "./screens/create.js";
 import { Dashboard } from "./screens/dashboard.js";
 import { Detail } from "./screens/detail.js";
+import { Login } from "./screens/login.js";
 import { StockScreen, toStockRows } from "./screens/stock.js";
 
 type View = "dashboard" | "detail" | "stock" | "create" | "help";
@@ -257,8 +260,58 @@ function App({ client }: { client: AutoDLClient }): React.ReactElement {
   );
 }
 
+/**
+ * Gate the dashboard behind a token, obtaining one if needed.
+ *
+ * Entering the TUI is now the default for a bare `autodl`, so it has to work on a
+ * machine that has never been configured: no token means a login screen, not an error.
+ * A token already in place goes straight through.
+ */
+function Root({ globals }: { globals: TuiGlobals }): React.ReactElement {
+  const { exit } = useApp();
+  const [client, setClient] = useState<AutoDLClient | null>(() => {
+    const resolved = tryResolveToken(globals.token);
+    if (!resolved) return null;
+    return new AutoDLClient({
+      token: resolved.token,
+      ...(resolveBaseUrl(globals.baseUrl) ? { baseUrl: resolveBaseUrl(globals.baseUrl) } : {}),
+    });
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [verifying, setVerifying] = useState(false);
+
+  const submit = useCallback(
+    (token: string) => {
+      setVerifying(true);
+      setError(null);
+      const baseUrl = resolveBaseUrl(globals.baseUrl);
+      const candidate = new AutoDLClient({ token, ...(baseUrl ? { baseUrl } : {}) });
+      // Verify before persisting — writing a dead token just moves the failure later,
+      // exactly as `autodl login` does.
+      getBalance(candidate)
+        .then(() => {
+          updateConfig({ token });
+          setClient(candidate);
+        })
+        .catch((err: Error) => setError(err.message))
+        .finally(() => setVerifying(false));
+    },
+    [globals.baseUrl],
+  );
+
+  if (!client) {
+    return <Login onSubmit={submit} onQuit={exit} error={error} verifying={verifying} />;
+  }
+  return <App client={client} />;
+}
+
+export interface TuiGlobals {
+  token?: string;
+  baseUrl?: string;
+}
+
 /** Mount the TUI. Resolves when the user quits. */
-export async function runTui(client: AutoDLClient): Promise<void> {
-  const app = render(<App client={client} />);
+export async function runTui(globals: TuiGlobals = {}): Promise<void> {
+  const app = render(<Root globals={globals} />);
   await app.waitUntilExit();
 }

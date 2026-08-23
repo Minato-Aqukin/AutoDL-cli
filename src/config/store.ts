@@ -85,6 +85,20 @@ export function resolveToken(explicit?: string): TokenResolution {
   });
 }
 
+/**
+ * Same precedence as `resolveToken`, but absence is an answer rather than an error.
+ *
+ * The TUI needs to open and offer a login screen when no token is configured, which a
+ * throwing lookup cannot express.
+ */
+export function tryResolveToken(explicit?: string): TokenResolution | undefined {
+  try {
+    return resolveToken(explicit);
+  } catch {
+    return undefined;
+  }
+}
+
 export function resolveBaseUrl(explicit?: string): string | undefined {
   return explicit ?? process.env.AUTODL_BASE_URL ?? readConfig().baseUrl;
 }

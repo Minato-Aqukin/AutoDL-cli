@@ -1,5 +1,4 @@
 import type { Command } from "commander";
-import { createContext } from "../context.js";
 import { UsageError } from "../core/errors.js";
 import { bareAction, globalsOf } from "./helpers.js";
 
@@ -23,19 +22,23 @@ export function assertInteractive(json: boolean): void {
   }
 }
 
-/** Load the TUI lazily so `mcp` / `ls` / `exec` never parse the Ink bundle. */
+/**
+ * Load the TUI lazily so `mcp` / `ls` / `exec` never parse the Ink bundle.
+ *
+ * Deliberately does not resolve a token here: the TUI opens without one and offers a
+ * login screen, so a first-time `autodl` lands somewhere useful instead of on an error.
+ */
 export async function launchTui(globals: {
   token?: string;
   baseUrl?: string;
   json?: boolean;
 }): Promise<void> {
   assertInteractive(globals.json === true);
-  const context = createContext({
+  const { runTui } = await import("../tui/app.js");
+  await runTui({
     ...(globals.token ? { token: globals.token } : {}),
     ...(globals.baseUrl ? { baseUrl: globals.baseUrl } : {}),
   });
-  const { runTui } = await import("../tui/app.js");
-  await runTui(context.client);
 }
 
 export function registerTuiCommand(program: Command): void {

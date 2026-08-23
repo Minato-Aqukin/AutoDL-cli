@@ -43,6 +43,10 @@ Requires Node.js 22+.
 autodl tui     # or just `autodl` in an interactive terminal
 ```
 
+On a machine with no token yet it opens on a login screen offering two things —
+configure a token, or quit. Paste the token, it is verified against the API before
+being saved, and you land on the dashboard. Once configured, `autodl` goes straight in.
+
 A live table of your instances: status, GPU, region, **how long each has been powered on
 and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
 detail, `s` start, `x` stop, `c` copy the SSH command, `D` release, `g` GPU stock, `n` new
@@ -367,7 +371,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 285 tests, no network access, no cost
+npm test            # 299 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```
