@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { GPU_SPECS } from "../../src/core/catalog.js";
 import { stringWidth } from "../../src/output/format.js";
 import { Confirm } from "../../src/tui/components/confirm.js";
-import { Header } from "../../src/tui/components/header.js";
+import { Header, ROW_COLORS, WORDMARK } from "../../src/tui/components/header.js";
 import { StatusBar } from "../../src/tui/components/statusbar.js";
 import type { DashboardRow } from "../../src/tui/data.js";
 import { equivalentCommand } from "../../src/tui/screens/create.js";
@@ -364,6 +364,26 @@ describe("Header account panel", () => {
     );
     expect(out).toContain("余额获取失败");
     expect(out).not.toContain("¥0.00");
+  });
+
+  it("gives every wordmark row a colour", () => {
+    // A row without one renders in the default foreground, which reads as a broken
+    // gradient — easy to introduce by editing the art and forgetting the palette.
+    expect(ROW_COLORS).toHaveLength(WORDMARK.length);
+  });
+
+  it("runs the gradient from white down to AutoDL blue", () => {
+    const rgb = ROW_COLORS.map((hex) => [
+      Number.parseInt(hex.slice(1, 3), 16),
+      Number.parseInt(hex.slice(3, 5), 16),
+      Number.parseInt(hex.slice(5, 7), 16),
+    ]);
+    expect(rgb[0]).toEqual([255, 255, 255]);
+    expect(rgb.at(-1)).toEqual([43, 107, 245]);
+    // Monotonic, so the fade reads as one direction rather than a wobble.
+    for (let i = 1; i < rgb.length; i++) {
+      expect((rgb[i] as number[])[0]).toBeLessThan((rgb[i - 1] as number[])[0] as number);
+    }
   });
 
   it("falls back to a compact header on a narrow terminal", () => {

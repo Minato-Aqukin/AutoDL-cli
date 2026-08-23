@@ -6,32 +6,37 @@ import { VERSION } from "../../version.js";
 import type { TokenIdentity } from "../account.js";
 
 /**
- * The framed header: brand mark, account, balance.
+ * The framed header: wordmark, account, balance.
  *
- * Drawn as a pixel font on a blue badge, echoing AutoDL's own white-on-blue mark. Every
- * glyph comes from the Block Elements range, which terminals render at single width —
- * box-drawing and other ambiguous-width characters get doubled in CJK-configured
- * terminals and would tear the alignment apart.
+ * The wordmark is block art. Note that `█`, `╗` and the rest all carry East Asian Width
+ * "Ambiguous", so a terminal configured to draw ambiguous characters double-width will
+ * render this at roughly twice its nominal columns. That is a deliberate trade for the
+ * look; the compact fallback below covers terminals too narrow to take it.
  */
 
-/**
- * The swirl. Only the swirl is drawn: the blue background *is* the badge, so outlining
- * a square here would paint a white box the official mark does not have.
- */
-const ICON = ["  ▄▄▄  ", " ▟▀▀▀▘ ", " ▙▄▄▖  ", " ▝▀▀▜▌ ", "  ▀▀▀  "];
-
-/** AUTODL on a 5-pixel grid, one terminal cell per pixel. */
-const WORDMARK = [
-  " ███  █   █ █████  ███  ████  █     ",
-  "█   █ █   █   █   █   █ █   █ █     ",
-  "█████ █   █   █   █   █ █   █ █     ",
-  "█   █ █   █   █   █   █ █   █ █     ",
-  "█   █  ███    █    ███  ████  █████ ",
+export const WORDMARK = [
+  "  █████╗  ██╗   ██╗ ████████╗  ██████╗  ██████╗  ██╗     ",
+  " ██╔══██╗ ██║   ██║ ╚══██╔══╝ ██╔═══██╗ ██╔══██╗ ██║     ",
+  " ███████║ ██║   ██║    ██║    ██║   ██║ ██║  ██║ ██║     ",
+  " ██╔══██║ ██║   ██║    ██║    ██║   ██║ ██║  ██║ ██║     ",
+  " ██║  ██║ ╚██████╔╝    ██║    ╚██████╔╝ ██████╔╝ ███████╗",
+  " ╚═╝  ╚═╝  ╚═════╝     ╚═╝     ╚═════╝  ╚═════╝  ╚══════╝",
 ];
 
-const ART_COLUMNS = (ICON[0] as string).length + (WORDMARK[0] as string).length;
-/** Below this the art would wrap, which looks worse than plain text. */
-const MIN_COLUMNS = ART_COLUMNS + 24;
+/**
+ * White at the top fading to AutoDL's blue at the bottom, one step per row.
+ *
+ * Written as hex so chalk emits truecolor where the terminal supports it and degrades
+ * to the nearest 256- or 16-colour match elsewhere, rather than us guessing.
+ */
+export const ROW_COLORS = ["#FFFFFF", "#D5E1FD", "#AAC4FB", "#80A6F9", "#5589F7", "#2B6BF5"];
+
+/** AutoDL's blue, reused for the frame and the compact fallback. */
+const BRAND_BLUE = "#2B6BF5";
+
+const ART_COLUMNS = (WORDMARK[0] as string).length;
+/** Art plus the account column plus the frame. Below this, fall back to one line. */
+const MIN_COLUMNS = ART_COLUMNS + 21;
 
 interface HeaderProps {
   subtitle: string;
@@ -39,6 +44,18 @@ interface HeaderProps {
   balance: Balance | null;
   balanceError: string | null;
   columns: number;
+}
+
+function Wordmark(): React.ReactElement {
+  return (
+    <Box flexDirection="column">
+      {WORDMARK.map((line, index) => (
+        <Text key={line} color={ROW_COLORS[index]}>
+          {line}
+        </Text>
+      ))}
+    </Box>
+  );
 }
 
 function AccountPanel({
@@ -51,7 +68,7 @@ function AccountPanel({
       <Text>
         <Text dimColor>账号 </Text>
         {/* AutoDL's open API exposes no display name, so the uid from the token is the
-            identity. Labelling it "账号" rather than inventing a name keeps that honest. */}
+            identity. Labelling it 账号 rather than inventing a name keeps that honest. */}
         <Text bold>{identity.uid ?? "—"}</Text>
       </Text>
       {balanceError ? (
@@ -63,10 +80,10 @@ function AccountPanel({
             <Text bold color="green">
               {formatYuan(balance.balanceYuan)}
             </Text>
-            {balance.voucherYuan > 0 ? (
-              <Text dimColor> +券 {formatYuan(balance.voucherYuan)}</Text>
-            ) : null}
           </Text>
+          {balance.voucherYuan > 0 ? (
+            <Text dimColor>券 {formatYuan(balance.voucherYuan)}</Text>
+          ) : null}
           <Text dimColor>累计 {formatYuan(balance.accumulatedYuan)}</Text>
         </>
       ) : (
@@ -76,10 +93,7 @@ function AccountPanel({
   );
 }
 
-/**
- * Brand mark on its own, for surfaces with no account to show — the login screen has
- * no token yet, so there is nothing to put in the account panel.
- */
+/** The gradient wordmark on its own, for surfaces with no account to show. */
 export function BrandMark({
   subtitle,
   columns,
@@ -87,10 +101,10 @@ export function BrandMark({
   subtitle: string;
   columns: number;
 }): React.ReactElement {
-  if (columns < MIN_COLUMNS) {
+  if (columns < ART_COLUMNS + 4) {
     return (
       <Box borderStyle="round" borderColor="blue" paddingX={1}>
-        <Text bold color="blue">
+        <Text bold color={BRAND_BLUE}>
           AutoDL
         </Text>
         <Text dimColor> · {subtitle}</Text>
@@ -99,18 +113,11 @@ export function BrandMark({
   }
 
   return (
-    <Box borderStyle="round" borderColor="blue" paddingX={1}>
-      <Box flexDirection="column">
-        {ICON.map((line, index) => (
-          <Text key={line} color="white" backgroundColor="blue">
-            {line + (WORDMARK[index] as string)}
-          </Text>
-        ))}
-      </Box>
-      <Box flexDirection="column" marginLeft={2} justifyContent="flex-end">
-        <Text dimColor>v{VERSION} · 非官方</Text>
-        <Text bold>{subtitle}</Text>
-      </Box>
+    <Box borderStyle="round" borderColor="blue" paddingX={1} flexDirection="column">
+      <Wordmark />
+      <Text dimColor>
+        v{VERSION} · 非官方 · {subtitle}
+      </Text>
     </Box>
   );
 }
@@ -125,40 +132,27 @@ export function Header({
   if (columns < MIN_COLUMNS) {
     return (
       <Box borderStyle="round" borderColor="blue" paddingX={1} justifyContent="space-between">
-        <Text bold color="blue">
+        <Text bold color={BRAND_BLUE}>
           AutoDL
           <Text dimColor> · {subtitle}</Text>
         </Text>
-        <Text>
-          {balance ? (
-            <Text color="green">{formatYuan(balance.balanceYuan)}</Text>
-          ) : (
-            <Text dimColor>—</Text>
-          )}
-        </Text>
+        {balance ? (
+          <Text color="green">{formatYuan(balance.balanceYuan)}</Text>
+        ) : (
+          <Text dimColor>—</Text>
+        )}
       </Box>
     );
   }
 
-  const art = ICON.map((line, index) => line + (WORDMARK[index] as string));
-
   return (
     <Box borderStyle="round" borderColor="blue" paddingX={1} justifyContent="space-between">
-      <Box>
-        <Box flexDirection="column">
-          {art.map((line) => (
-            <Text key={line} color="white" backgroundColor="blue">
-              {line}
-            </Text>
-          ))}
-        </Box>
-        <Box flexDirection="column" marginLeft={2} justifyContent="flex-end">
-          <Text dimColor>v{VERSION} · 非官方</Text>
-          <Text bold>{subtitle}</Text>
-        </Box>
-      </Box>
-      <Box marginLeft={2} justifyContent="flex-end" flexDirection="column">
+      <Wordmark />
+      <Box flexDirection="column" marginLeft={2} justifyContent="space-between">
         <AccountPanel identity={identity} balance={balance} balanceError={balanceError} />
+        <Text dimColor>
+          v{VERSION} · {subtitle}
+        </Text>
       </Box>
     </Box>
   );

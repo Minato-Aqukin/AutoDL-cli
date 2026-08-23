@@ -352,7 +352,7 @@ GPU 规格、地区、公共基础镜像三张表是内置的静态数据，因�
 ```bash
 npm install
 npm run build
-npm test            # 323 个测试，不访问网络，不产生任何费用
+npm test            # 325 个测试，不访问网络，不产生任何费用
 npm run lint
 npm run typecheck
 ```

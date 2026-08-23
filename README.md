@@ -381,7 +381,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 323 tests, no network access, no cost
+npm test            # 325 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```
