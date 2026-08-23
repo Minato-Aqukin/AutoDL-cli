@@ -69,7 +69,16 @@ This repo uses [changesets](https://github.com/changesets/changesets):
 npx changeset          # describe your change, pick a bump
 ```
 
-Merging to `main` with a changeset present opens a release PR; merging that publishes.
+Merging to `main` with a changeset present opens a release PR; merging that PR publishes.
+
+Two one-time setup steps are needed before the publish step can succeed:
+
+1. An `NPM_TOKEN` repository secret with publish rights to the `@minatoaqukin` scope.
+   (The workflow also sets `NPM_CONFIG_PROVENANCE`, so the token must be granted from an
+   account with 2FA configured for automation.)
+2. Settings → Actions → General → Workflow permissions →
+   **Allow GitHub Actions to create and approve pull requests**, otherwise changesets can
+   push the release branch but cannot open the PR.
 
 ## Code of conduct
 
