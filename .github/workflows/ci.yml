@@ -15,8 +15,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Lowest supported version, current LTS, and current.
-        node: [20, 22, 24]
+        # Node 20 reached EOL on 2026-04-30; Ink 7 requires >=22 anyway.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v4
 
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
       - run: npm ci
       - run: npm run build

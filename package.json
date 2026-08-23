@@ -1,7 +1,7 @@
 {
   "name": "@minatoaqukin/autodl-cli",
   "version": "0.0.0",
-  "description": "Agent-friendly CLI, MCP server and SDK for managing AutoDL GPU instances \u2014 create, boot, SSH, run and auto-shutdown, all scriptable.",
+  "description": "Agent-friendly CLI, MCP server and SDK for managing AutoDL GPU instances — create, boot, SSH, run and auto-shutdown, all scriptable.",
   "keywords": [
     "autodl",
     "gpu",
@@ -26,7 +26,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "bin": {
     "autodl": "./dist/cli.js"
@@ -42,6 +42,7 @@
   },
   "files": [
     "dist",
+    "!dist/**/*.map",
     "README.md",
     "README.zh-CN.md",
     "LICENSE"
@@ -64,7 +65,9 @@
     "@modelcontextprotocol/sdk": "^1.20.0",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.0",
+    "ink": "^7.1.1",
     "picocolors": "^1.1.1",
+    "react": "^19.2.8",
     "ssh2": "^1.17.0",
     "zod": "^3.25.76"
   },
@@ -73,7 +76,9 @@
     "@changesets/changelog-github": "^1.0.0",
     "@changesets/cli": "^2.29.0",
     "@types/node": "^22.15.0",
+    "@types/react": "^19.2.18",
     "@types/ssh2": "^1.15.5",
+    "ink-testing-library": "^4.0.0",
     "tsup": "^8.5.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"

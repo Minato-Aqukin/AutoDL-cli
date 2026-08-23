@@ -9,6 +9,7 @@ import { registerMcpCommand } from "./commands/mcp.js";
 import { registerRunCommand } from "./commands/run.js";
 import { registerSSHCommands } from "./commands/ssh.js";
 import { registerStockCommand } from "./commands/stock.js";
+import { registerTuiCommand } from "./commands/tui.js";
 import { ExitCode, toAutoDLError } from "./core/errors.js";
 import { emitError } from "./output/format.js";
 import { VERSION } from "./version.js";
@@ -45,6 +46,7 @@ export function buildProgram(): Command {
   registerGuardCommands(program);
   registerCatalogCommands(program);
   registerStockCommand(program);
+  registerTuiCommand(program);
   registerMcpCommand(program);
 
   program.addHelpText(
@@ -71,7 +73,34 @@ export function buildProgram(): Command {
   return program;
 }
 
+/**
+ * Whether a bare `autodl` should open the dashboard.
+ *
+ * Deliberately narrow. A script that runs `autodl` with no arguments must keep getting
+ * help on stdout exactly as before, so every one of these has to hold: no arguments, a
+ * real terminal on both ends, and no --json anywhere on the line.
+ */
+export function shouldLaunchBareTui(argv: string[]): boolean {
+  const args = argv.slice(2);
+  if (args.length > 0) return false;
+  if (!process.stdout.isTTY || !process.stdin.isTTY) return false;
+  return true;
+}
+
 export async function main(argv: string[] = process.argv): Promise<void> {
+  if (shouldLaunchBareTui(argv)) {
+    try {
+      const { launchTui } = await import("./commands/tui.js");
+      await launchTui({});
+      return;
+    } catch (err) {
+      const error = toAutoDLError(err);
+      emitError(error);
+      process.exitCode = error.exitCode;
+      return;
+    }
+  }
+
   const program = buildProgram();
   try {
     await program.parseAsync(argv);

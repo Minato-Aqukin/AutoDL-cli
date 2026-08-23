@@ -31,7 +31,27 @@ npm install -g @minatoaqukin/autodl-cli   # 之后直接用 autodl 命令
 npx @minatoaqukin/autodl-cli <command>    # 或者不安装直接用
 ```
 
-需要 Node.js 20 及以上。
+需要 Node.js 22 及以上。
+
+## 交互式看板
+
+```bash
+autodl tui     # 交互式终端里直接敲 autodl 也进
+```
+
+一张会自己刷新的实例表：状态、GPU、地区、**已开机多久、大概花了多少钱**、TTL 还剩多少。
+快捷键：`↑↓` 移动、`Enter` 详情、`s` 开机、`x` 关机、`c` 复制 SSH 命令、`D` 释放、
+`g` 看 GPU 库存、`n` 新建、`r` 刷新、`q` 退出。
+
+做它的理由很简单：AutoDL 按开机时长计费，最贵的错误不是敲错命令，而是"忘了还开着"。
+把这张表开着，这件事就一直是可见的。
+
+有两处刻意的诚实约束。单价只能从**运行中**实例的 snapshot 拿到，所以已关机的实例
+只显示时长、不显示金额——编一个看起来合理的数字比留空更糟。单价还没拉到时，
+汇总栏会明说"总额偏低"，而不是安静地少报。
+
+TUI 不会在管道、CI 或 `--json` 下启动：它会以退出码 2 退出并说明原因，
+而不是去接管一个并不存在的终端。非交互环境下裸 `autodl` 仍然和以前一样打印帮助。
 
 ## 配置
 
@@ -242,6 +262,7 @@ autodl guard idle pro-xxx --threshold 5 --samples 6 --interval 1m
 | `guard ttl\|cancel\|idle\|list\|sweep` | 成本护栏 |
 | `image save <id> <name>` / `images` | 私有镜像管理 |
 | `gpus` / `regions` | 查询内置目录 |
+| `tui` | 交互式看板（裸 `autodl` 也进入） |
 | `mcp` | 以 MCP server 运行 |
 
 全局参数：`--json`、`--yes`、`--token`、`--base-url`、`--lang zh|en`、`--verbose`、
@@ -320,7 +341,7 @@ GPU 规格、地区、公共基础镜像三张表是内置的静态数据，因�
 ```bash
 npm install
 npm run build
-npm test            # 248 个测试，不访问网络，不产生任何费用
+npm test            # 285 个测试，不访问网络，不产生任何费用
 npm run lint
 npm run typecheck
 ```

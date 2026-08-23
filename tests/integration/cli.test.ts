@@ -311,6 +311,42 @@ describe("commands that need no credentials", () => {
   });
 });
 
+describe("the TUI never hijacks a non-interactive session", () => {
+  // The whole agent contract rests on this: stdout stays parseable and nothing takes
+  // over the terminal. Failing loudly beats degrading silently, because a script that
+  // reaches here has a bug worth seeing.
+  it("refuses `tui` under --json with exit 2", async () => {
+    const result = await runCli(["tui", "--json"]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("--json");
+  });
+
+  it("refuses `tui` when stdout is not a terminal", async () => {
+    // runCli always pipes, so this is the piped/CI/agent case by construction.
+    const result = await runCli(["tui"]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("交互式终端");
+  });
+
+  it("still prints help for a bare `autodl` outside a terminal", async () => {
+    const result = await runCli([]);
+    // Commander treats "no command" as a usage error, so help goes to stderr with a
+    // non-zero exit — long-standing behaviour that the TUI branch must not disturb.
+    expect(result.stderr).toContain("Usage: autodl");
+    expect(result.stdout).toBe("");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("实例看板");
+  });
+
+  it("keeps `ls --json` pure JSON now that a TUI exists", async () => {
+    const result = await runCli(["ls", "--json"]);
+    expect(() => JSON.parse(result.stdout)).not.toThrow();
+  });
+
+  it("lists tui in help", async () => {
+    expect((await runCli(["--help"])).stdout).toContain("tui");
+  });
+});
+
 describe("help and version", () => {
   it("prints help with exit 0", async () => {
     const result = await runCli(["--help"]);

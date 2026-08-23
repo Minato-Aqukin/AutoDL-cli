@@ -35,7 +35,30 @@ npm install -g @minatoaqukin/autodl-cli   # then: autodl <command>
 npx @minatoaqukin/autodl-cli <command>    # or without installing
 ```
 
-Requires Node.js 20+.
+Requires Node.js 22+.
+
+## The dashboard
+
+```bash
+autodl tui     # or just `autodl` in an interactive terminal
+```
+
+A live table of your instances: status, GPU, region, **how long each has been powered on
+and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
+detail, `s` start, `x` stop, `c` copy the SSH command, `D` release, `g` GPU stock, `n` new
+instance, `r` refresh, `q` quit.
+
+It exists because AutoDL bills on power state: the expensive mistake is not a wrong
+command, it's an instance nobody remembered to stop. Leaving this open makes that visible.
+
+Two deliberate honesty constraints. A rate is only knowable from a **running** instance's
+snapshot, so a stopped instance shows elapsed time and no money — inventing a number
+would be worse than showing none. And while a rate is still loading the total says so
+rather than quietly under-reporting.
+
+The TUI never runs in a pipe, in CI, or under `--json`: it exits with code 2 and an
+explanation instead of taking over a terminal that isn't there. A bare `autodl` outside
+an interactive terminal still prints help exactly as before.
 
 ## Setup
 
@@ -255,6 +278,7 @@ stderr, so `autodl ... --json | jq` is always safe.
 | `guard ttl\|cancel\|idle\|list\|sweep` | Cost guards |
 | `image save <id> <name>` / `images` | Private image management |
 | `gpus` / `regions` | Catalogue lookup |
+| `tui` | Interactive dashboard (also entered by a bare `autodl`) |
 | `mcp` | Run as an MCP server |
 
 Global flags: `--json`, `--yes`, `--token`, `--base-url`, `--lang zh|en`, `--verbose`,
@@ -343,7 +367,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 248 tests, no network access, no cost
+npm test            # 285 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```
