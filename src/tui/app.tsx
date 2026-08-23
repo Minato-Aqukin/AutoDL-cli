@@ -9,8 +9,9 @@ import { createInstance } from "../core/endpoints/instance.js";
 import type { StockSnapshot } from "../core/stock.js";
 import { getStockByRegion } from "../core/stock.js";
 import { composeStartCommand, recordTTL } from "../guard/ttl.js";
-import { VERSION } from "../version.js";
+import { configureOutput, isJson, isVerbose } from "../output/format.js";
 import { Confirm } from "./components/confirm.js";
+import { Logo } from "./components/logo.js";
 import { StatusBar } from "./components/statusbar.js";
 import {
   type DashboardRow,
@@ -26,6 +27,14 @@ import { Login } from "./screens/login.js";
 import { StockScreen, toStockRows } from "./screens/stock.js";
 
 type View = "dashboard" | "detail" | "stock" | "create" | "help";
+
+const SCREEN_TITLES: Record<View, string> = {
+  dashboard: "实例看板",
+  detail: "实例详情",
+  stock: "GPU 库存",
+  create: "新建实例",
+  help: "快捷键",
+};
 type Pending = { kind: "release"; row: DashboardRow } | null;
 
 const DASHBOARD_KEYS =
@@ -195,15 +204,7 @@ function App({ client }: { client: AutoDLClient }): React.ReactElement {
 
   return (
     <Box flexDirection="column" paddingY={1}>
-      <Box paddingX={1}>
-        <Text bold color="cyan">
-          AutoDL
-        </Text>
-        <Text dimColor>
-          {" "}
-          v{VERSION} · {view === "dashboard" ? "实例看板" : view}
-        </Text>
-      </Box>
+      <Logo subtitle={SCREEN_TITLES[view]} />
 
       {pending ? (
         <Confirm
@@ -310,8 +311,47 @@ export interface TuiGlobals {
   baseUrl?: string;
 }
 
-/** Mount the TUI. Resolves when the user quits. */
+/** Switch to the terminal's alternate screen: a private, fixed canvas. */
+const ENTER_ALT_SCREEN = "\u001B[?1049h";
+const LEAVE_ALT_SCREEN = "\u001B[?1049l";
+const CLEAR = "\u001B[2J\u001B[H";
+
+/**
+ * Mount the TUI. Resolves when the user quits.
+ *
+ * Runs on the alternate screen buffer so the dashboard owns a fixed canvas rather than
+ * scrolling below whatever was already on screen — and so quitting restores the
+ * terminal exactly as it was, scrollback intact.
+ *
+ * Core helpers are silenced for the duration: they write to stderr, which would land
+ * inside the rendered frame. Their messages reach the user through the status bar.
+ */
 export async function runTui(globals: TuiGlobals = {}): Promise<void> {
-  const app = render(<Root globals={globals} />);
-  await app.waitUntilExit();
+  const previous = { json: isJson(), verbose: isVerbose() };
+  configureOutput({ quiet: true });
+
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    process.stdout.write(LEAVE_ALT_SCREEN);
+    configureOutput({ quiet: false, json: previous.json, verbose: previous.verbose });
+  };
+
+  // Cover the paths that bypass a normal unmount, or the user's shell is left on a
+  // blank alternate screen with no prompt.
+  process.once("exit", restore);
+  process.once("SIGINT", restore);
+  process.once("SIGTERM", restore);
+
+  process.stdout.write(ENTER_ALT_SCREEN + CLEAR);
+  try {
+    const app = render(<Root globals={globals} />);
+    await app.waitUntilExit();
+  } finally {
+    restore();
+    process.off("exit", restore);
+    process.off("SIGINT", restore);
+    process.off("SIGTERM", restore);
+  }
 }

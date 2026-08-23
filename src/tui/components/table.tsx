@@ -13,10 +13,17 @@ import { stringWidth } from "../../output/format.js";
 export interface Column<T> {
   header: string;
   width: number;
-  /** Rendered cell. Returning a React node allows per-cell colouring. */
-  render: (row: T) => React.ReactNode;
-  /** Plain text of the same cell, used for width accounting. */
+  /** The cell's plain text. The table clips it to `width` before anything else. */
   text: (row: T) => string;
+  /**
+   * Optional styling, given the *already-clipped* text.
+   *
+   * Renderers must use the string handed to them rather than re-deriving it: padding is
+   * computed from the clipped value, so emitting the full text here would overflow the
+   * column and shove every later column out of line — which is exactly what a long
+   * instance name used to do.
+   */
+  render?: (row: T, clipped: string) => React.ReactNode;
 }
 
 function pad(value: string, width: number): string {
@@ -74,11 +81,11 @@ export function Table<T>({
           <Box key={keyFor(row)} paddingX={1}>
             <Text inverse={selected}>{selected ? "›" : " "}</Text>
             {columns.map((column) => {
-              const raw = clip(column.text(row), column.width);
+              const clipped = clip(column.text(row), column.width);
               return (
                 <Text key={column.header} inverse={selected}>
-                  {column.render(row)}
-                  {pad(raw, column.width)}{" "}
+                  {column.render ? column.render(row, clipped) : clipped}
+                  {pad(clipped, column.width)}{" "}
                 </Text>
               );
             })}

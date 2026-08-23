@@ -41,7 +41,6 @@ const columns: Column<StockRow>[] = [
     header: "地区",
     width: 12,
     text: (row) => row.regionName,
-    render: (row) => <Text>{row.regionName}</Text>,
   },
   {
     header: "可建Pro",
@@ -53,26 +52,25 @@ const columns: Column<StockRow>[] = [
     header: "GPU",
     width: 18,
     text: (row) => row.gpuName,
-    render: (row) => <Text>{row.gpuName}</Text>,
   },
   {
     header: "可租规格",
     width: 12,
     text: (row) => row.gpuSpec ?? "—",
-    render: (row) =>
-      row.gpuSpec ? <Text color="green">{row.gpuSpec}</Text> : <Text dimColor>—</Text>,
+    render: (row, clipped) =>
+      row.gpuSpec ? <Text color="green">{clipped}</Text> : <Text dimColor>{clipped}</Text>,
   },
   {
     header: "空闲",
     width: 7,
     text: (row) => String(row.idle),
-    render: (row) => <Text bold={row.idle > 0}>{row.idle}</Text>,
+    render: (row, clipped) => <Text bold={row.idle > 0}>{clipped}</Text>,
   },
   {
     header: "总数",
     width: 7,
     text: (row) => String(row.total),
-    render: (row) => <Text dimColor>{row.total}</Text>,
+    render: (_row, clipped) => <Text dimColor>{clipped}</Text>,
   },
 ];
 

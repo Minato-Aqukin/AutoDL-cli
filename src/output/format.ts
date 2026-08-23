@@ -17,9 +17,17 @@ export interface OutputOptions {
   json: boolean;
   color: boolean;
   verbose: boolean;
+  /**
+   * Silence every human-facing writer.
+   *
+   * The TUI owns the screen: any stray write from a core helper — "正在开机…", a debug
+   * line, a sweep warning — lands in the middle of the rendered frame and corrupts the
+   * layout. Those messages are still surfaced, but through the status bar instead.
+   */
+  quiet: boolean;
 }
 
-let options: OutputOptions = { json: false, color: true, verbose: false };
+let options: OutputOptions = { json: false, color: true, verbose: false, quiet: false };
 
 export function configureOutput(next: Partial<OutputOptions>): void {
   options = { ...options, ...next };
@@ -34,22 +42,22 @@ export const isVerbose = (): boolean => options.verbose;
 
 /** Status messages, prompts and progress — never stdout, so JSON stays parseable. */
 export function note(message: string): void {
-  if (options.json) return;
+  if (options.json || options.quiet) return;
   process.stderr.write(`${message}\n`);
 }
 
 export function success(message: string): void {
-  if (options.json) return;
+  if (options.json || options.quiet) return;
   process.stderr.write(`${pc.green("✔")} ${message}\n`);
 }
 
 export function warn(message: string): void {
-  if (options.json) return;
+  if (options.json || options.quiet) return;
   process.stderr.write(`${pc.yellow("!")} ${message}\n`);
 }
 
 export function debug(message: string): void {
-  if (!options.verbose) return;
+  if (!options.verbose || options.quiet) return;
   process.stderr.write(`${pc.dim(`[debug] ${message}`)}\n`);
 }
 

@@ -2,6 +2,7 @@ import { Box, Text, useInput } from "ink";
 import type React from "react";
 import { useState } from "react";
 import { configPath } from "../../config/store.js";
+import { Logo } from "../components/logo.js";
 
 /**
  * Token entry, shown when the TUI starts without credentials.
@@ -73,48 +74,47 @@ export function Login({ onSubmit, onQuit, error, verifying }: LoginProps): React
   });
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
-      <Text bold color="cyan">
-        欢迎使用 AutoDL
-      </Text>
-
-      {stage === "menu" ? (
-        <Box flexDirection="column" marginTop={1}>
-          <Text dimColor>尚未配置开发者 Token，请先登入。</Text>
+    <Box flexDirection="column">
+      <Logo subtitle="登入" />
+      <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
+        {stage === "menu" ? (
           <Box flexDirection="column" marginTop={1}>
-            <Text inverse={choice === 0}>{choice === 0 ? "› " : "  "}配置 Token 登入</Text>
-            <Text inverse={choice === 1}>{choice === 1 ? "› " : "  "}退出</Text>
+            <Text dimColor>尚未配置开发者 Token，请先登入。</Text>
+            <Box flexDirection="column" marginTop={1}>
+              <Text inverse={choice === 0}>{choice === 0 ? "› " : "  "}配置 Token 登入</Text>
+              <Text inverse={choice === 1}>{choice === 1 ? "› " : "  "}退出</Text>
+            </Box>
+            <Box marginTop={1}>
+              <Text dimColor>↑↓ 选择 · Enter 确定 · q 退出</Text>
+            </Box>
           </Box>
-          <Box marginTop={1}>
-            <Text dimColor>↑↓ 选择 · Enter 确定 · q 退出</Text>
+        ) : (
+          <Box flexDirection="column" marginTop={1}>
+            <Text dimColor>粘贴你的开发者 Token：</Text>
+            <Text dimColor>AutoDL 控制台 → 设置 → 开发者 Token（需先完成实名认证）</Text>
+            <Box marginTop={1}>
+              <Text>{"› "}</Text>
+              {/* Masked: it is a credential. The length confirms a paste actually landed. */}
+              <Text color="green">{token ? "•".repeat(Math.min(token.length, 48)) : ""}</Text>
+              <Text dimColor>{token ? ` (${token.length} 字符)` : "等待输入…"}</Text>
+            </Box>
+            <Box marginTop={1}>
+              <Text dimColor>
+                {verifying ? "正在验证…" : "Enter 验证并保存 · Esc 返回 · 支持直接粘贴"}
+              </Text>
+            </Box>
           </Box>
-        </Box>
-      ) : (
-        <Box flexDirection="column" marginTop={1}>
-          <Text dimColor>粘贴你的开发者 Token：</Text>
-          <Text dimColor>AutoDL 控制台 → 设置 → 开发者 Token（需先完成实名认证）</Text>
-          <Box marginTop={1}>
-            <Text>{"› "}</Text>
-            {/* Masked: it is a credential. The length confirms a paste actually landed. */}
-            <Text color="green">{token ? "•".repeat(Math.min(token.length, 48)) : ""}</Text>
-            <Text dimColor>{token ? ` (${token.length} 字符)` : "等待输入…"}</Text>
-          </Box>
-          <Box marginTop={1}>
-            <Text dimColor>
-              {verifying ? "正在验证…" : "Enter 验证并保存 · Esc 返回 · 支持直接粘贴"}
-            </Text>
-          </Box>
-        </Box>
-      )}
+        )}
 
-      {error ? (
+        {error ? (
+          <Box marginTop={1}>
+            <Text color="red">✖ {error}</Text>
+          </Box>
+        ) : null}
+
         <Box marginTop={1}>
-          <Text color="red">✖ {error}</Text>
+          <Text dimColor>验证通过后会保存到 {configPath()}（权限 0600）</Text>
         </Box>
-      ) : null}
-
-      <Box marginTop={1}>
-        <Text dimColor>验证通过后会保存到 {configPath()}（权限 0600）</Text>
       </Box>
     </Box>
   );

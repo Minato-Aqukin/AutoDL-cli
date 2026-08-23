@@ -52,6 +52,10 @@ and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move,
 detail, `s` start, `x` stop, `c` copy the SSH command, `D` release, `g` GPU stock, `n` new
 instance, `r` refresh, `q` quit.
 
+It runs on the terminal's alternate screen, so it owns a fixed canvas instead of
+scrolling below whatever was already there, and quitting restores your prompt and
+scrollback untouched.
+
 It exists because AutoDL bills on power state: the expensive mistake is not a wrong
 command, it's an instance nobody remembered to stop. Leaving this open makes that visible.
 
@@ -371,7 +375,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 299 tests, no network access, no cost
+npm test            # 305 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```

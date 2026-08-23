@@ -1,6 +1,7 @@
 import { render } from "ink-testing-library";
 import { describe, expect, it, vi } from "vitest";
 import { GPU_SPECS } from "../../src/core/catalog.js";
+import { stringWidth } from "../../src/output/format.js";
 import { Confirm } from "../../src/tui/components/confirm.js";
 import { StatusBar } from "../../src/tui/components/statusbar.js";
 import type { DashboardRow } from "../../src/tui/data.js";
@@ -97,6 +98,62 @@ describe("Dashboard", () => {
       render(<Dashboard rows={[]} selectedIndex={0} loading={false} />).lastFrame(),
     );
     expect(out).toContain("没有实例");
+  });
+});
+
+describe("column alignment", () => {
+  /** Display column at which `token` begins, counting CJK as two. */
+  function columnOf(line: string, token: string): number {
+    const index = line.indexOf(token);
+    if (index < 0) return -1;
+    return stringWidth(line.slice(0, index));
+  }
+
+  const NAMES = [
+    "short",
+    "这是一个非常非常长的中文实例名字会超出列宽",
+    "a-very-long-english-instance-name-overflowing",
+    "混合mixed名字abc",
+    "",
+  ];
+
+  function dataLines(selectedIndex: number): string[] {
+    const rows = NAMES.map((name, index) =>
+      row({ instance: { ...row().instance, uuid: `pro-${index}`, name } }),
+    );
+    return plain(
+      render(<Dashboard rows={rows} selectedIndex={selectedIndex} loading={false} />).lastFrame(),
+    )
+      .split("\n")
+      .filter((line) => line.includes("running"));
+  }
+
+  it("starts every later column at the same place however long the name is", () => {
+    // The renderer used to paint the full text while padding by the clipped width, so
+    // a single long name shoved every column after it out of line.
+    const lines = dataLines(-1);
+    expect(lines).toHaveLength(NAMES.length);
+
+    for (const token of ["running", "4090D", "北京B区", "≈¥1.97", "10m"]) {
+      const columns = lines.map((line) => columnOf(line, token));
+      expect(new Set(columns).size, `${token} at ${columns.join(",")}`).toBe(1);
+      expect(columns[0]).toBeGreaterThan(0);
+    }
+  });
+
+  it("keeps alignment when a row is selected", () => {
+    const lines = dataLines(2);
+    const columns = lines.map((line) => columnOf(line, "running"));
+    expect(new Set(columns).size).toBe(1);
+  });
+
+  it("truncates an overlong name rather than letting it overflow", () => {
+    const long = row({ instance: { ...row().instance, name: "x".repeat(60) } });
+    const out = plain(
+      render(<Dashboard rows={[long]} selectedIndex={0} loading={false} />).lastFrame(),
+    );
+    expect(out).toContain("…");
+    expect(out).not.toContain("x".repeat(40));
   });
 });
 
