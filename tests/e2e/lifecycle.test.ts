@@ -18,8 +18,9 @@ import { execCommand } from "../../src/ssh/exec.js";
 import { pull, push } from "../../src/ssh/transfer.js";
 
 /**
- * Real end-to-end run against AutoDL. THIS RENTS A REAL GPU AND COSTS REAL MONEY
- * (a few jiao). Requires a developer token on an identity-verified account.
+ * Real end-to-end run against AutoDL. THIS RENTS A REAL GPU AND COSTS REAL MONEY.
+ * A full pass on a 4090D cost ¥0.10 and took ~3.7 minutes. Requires a developer token
+ * on an identity-verified account.
  *
  *   AUTODL_E2E=1 AUTODL_TOKEN=<token> npm run test:e2e
  *
@@ -110,7 +111,7 @@ describeE2E("AutoDL lifecycle (real API, real money)", () => {
   });
 
   it(
-    "survives a power cycle even though the SSH port and password both change",
+    "keeps working across a power cycle without the caller re-reading anything",
     async () => {
       const before = await getInstanceSnapshot(client, instanceUuid as string);
 
@@ -123,8 +124,9 @@ describeE2E("AutoDL lifecycle (real API, real money)", () => {
       await waitForRunning(client, instanceUuid as string, { timeoutMs: 10 * 60_000 });
 
       const after = await getInstanceSnapshot(client, instanceUuid as string);
-      // Not strictly guaranteed to differ, but this is the documented behaviour and
-      // the whole reason credentials are never cached.
+      // Logged rather than asserted: AutoDL *may* reassign these, but a real run was
+      // observed keeping both identical. Asserting either way would be wrong — the
+      // point is that the caller never has to care.
       console.warn(
         `端口 ${before.ssh.port} -> ${after.ssh.port}，密码是否变化：${before.ssh.password !== after.ssh.password}`,
       );

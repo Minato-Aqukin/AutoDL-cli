@@ -149,17 +149,38 @@ describe("withSSH credential rotation", () => {
     expect(used.password).toBe("pw-new");
   });
 
-  it("gives up after one refresh and reports an SSH failure (exit 8)", async () => {
+  it("gives up after the attempt budget and reports an SSH failure (exit 8)", async () => {
     const fetchMock = mockFetch([
       { path: STATUS, response: statusOk("running") },
       { path: SNAPSHOT, response: snapshotWith(34222, "pw-a") },
     ]);
     await expect(
-      withSSH(client(fetchMock.impl), "pro-1", async () => "unreachable"),
+      // connectAttempts: 2 keeps the test off the real backoff schedule.
+      withSSH(client(fetchMock.impl), "pro-1", async () => "unreachable", {
+        connectAttempts: 2,
+      }),
     ).rejects.toThrow(SSHError);
-    // Exactly two attempts: the original and one forced refresh.
     expect(ssh.connections).toHaveLength(2);
   });
+
+  it("waits between attempts, since an instant retry cannot fix a slow-booting sshd", async () => {
+    // Observed on a real instance: AutoDL reports `running` before sshd accepts
+    // connections. Firing retries back to back would just fail three times fast.
+    ssh.openPorts.add(34222);
+    const fetchMock = mockFetch([
+      { path: STATUS, response: statusOk("running") },
+      {
+        path: SNAPSHOT,
+        // Only the second read yields a port the fake server will accept.
+        response: (_call, index) =>
+          index === 0 ? snapshotWith(59999, "pw-a") : snapshotWith(34222, "pw-a"),
+      },
+    ]);
+
+    const started = Date.now();
+    await withSSH(client(fetchMock.impl), "pro-1", async (_conn, creds) => creds.port);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_500);
+  }, 20_000);
 
   it("does not swallow an error thrown by the caller's own callback", async () => {
     ssh.openPorts.add(34222);

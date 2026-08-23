@@ -31,9 +31,11 @@ export interface CredentialOptions {
 /**
  * Fetch live SSH credentials for an instance.
  *
- * AutoDL reassigns `ssh_port` and `root_password` on **every** power cycle, so a
- * snapshot taken before a stop/start is worthless. Nothing in this codebase may cache
- * credentials across calls — always come back through here.
+ * AutoDL may reassign `ssh_port` and `root_password` on any power cycle — the instance
+ * can be rescheduled onto a different machine. It does not always happen (a real
+ * stop/start was observed keeping both identical), which is exactly why caching is
+ * unsafe: the stale value works often enough to hide the bug. Nothing in this codebase
+ * may cache credentials across calls — always come back through here.
  */
 export async function getCredentials(
   client: AutoDLClient,
@@ -77,6 +79,21 @@ export interface ConnectOptions extends CredentialOptions {
   /** Socket-level connect timeout. */
   connectTimeoutMs?: number;
   keepaliveIntervalMs?: number;
+  /** Connection attempts before giving up. Each one re-reads the credentials. */
+  connectAttempts?: number;
+}
+
+/**
+ * Backoff between connection attempts.
+ *
+ * A freshly created instance reports `running` before sshd is accepting connections —
+ * observed on a real 4090D, where the first connect was refused and only the retry
+ * succeeded. Retrying instantly would just fail again, so wait a little between tries.
+ */
+const RETRY_DELAYS_MS = [2_000, 5_000, 8_000];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function connectOnce(creds: SSHCredentials, options: ConnectOptions): Promise<Client> {
@@ -110,9 +127,10 @@ function connectOnce(creds: SSHCredentials, options: ConnectOptions): Promise<Cl
 /**
  * The single funnel for every SSH operation.
  *
- * Connects with fresh credentials and — because a port can rotate between the moment
- * we read the snapshot and the moment we dial — retries exactly once with a forced
- * credential refresh before giving up.
+ * Each attempt re-reads the credentials, which covers both ways a connection can fail:
+ * the port may have been reassigned since the snapshot was taken, and sshd may simply
+ * not be up yet on a freshly booted instance. The first is fixed by the refresh, the
+ * second only by waiting — so attempts are spaced out rather than fired back to back.
  */
 export async function withSSH<T>(
   client: AutoDLClient,
@@ -121,9 +139,13 @@ export async function withSSH<T>(
   options: ConnectOptions = {},
 ): Promise<T> {
   let lastError: unknown;
+  const attempts = Math.max(1, options.connectAttempts ?? 3);
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (attempt > 0) note(t("ssh.refreshing"));
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    if (attempt > 0) {
+      note(t("ssh.refreshing"));
+      await delay(RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS.at(-1) ?? 5_000);
+    }
     const creds = await getCredentials(client, uuid, options);
 
     let conn: Client;
@@ -142,8 +164,8 @@ export async function withSSH<T>(
     }
   }
 
-  throw new SSHError(`无法连接到实例 ${uuid}`, {
-    hint: "实例可能刚重启完成，稍后重试；或运行 `autodl info <id>` 手动核对 SSH 端口。",
+  throw new SSHError(`无法连接到实例 ${uuid}（已尝试 ${attempts} 次）`, {
+    hint: "实例可能仍在启动中，稍后重试；或运行 `autodl info <id>` 手动核对 SSH 端口。",
     cause: lastError,
   });
 }

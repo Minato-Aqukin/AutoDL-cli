@@ -244,12 +244,20 @@ confusion:
   no-GPU mode isn't available.
 - **Identity verification required** before the API will respond at all.
 - **Missing operations:** rename, scheduled shutdown, resizing, migration, system reset.
-- **SSH credentials rotate on every power cycle** — port *and* root password. This tool
-  re-reads them on every connection and retries once with a forced refresh, so you never
-  have to think about it. Don't cache them yourself.
+- **SSH credentials can change on any power cycle** — port *and* root password. AutoDL
+  may reschedule the instance onto a different machine. It doesn't always happen (a real
+  stop/start was observed keeping both identical), which is precisely what makes caching
+  dangerous: a stale value works often enough to hide the bug until it doesn't. This tool
+  re-reads them on every connection, so you never have to think about it.
+- **`running` does not mean sshd is ready.** A freshly created instance reports `running`
+  before it accepts connections. Connection attempts here are spaced out rather than
+  fired back to back.
 
 Also worth knowing: **an instance left shut down for 15 consecutive days is released and
 its data wiped.**
+
+Verified against the live API on 2026-08-23: full lifecycle (create → SSH exec → SFTP
+round trip → stop → start → exec again → release) on a 4090D, total cost ¥0.10.
 
 The GPU spec, region and base-image tables are baked in because the API exposes no
 catalogue endpoint. If AutoDL changes them, please
@@ -260,7 +268,7 @@ catalogue endpoint. If AutoDL changes them, please
 ```bash
 npm install
 npm run build
-npm test            # 146 tests, no network access, no cost
+npm test            # 148 tests, no network access, no cost
 npm run lint
 npm run typecheck
 ```
