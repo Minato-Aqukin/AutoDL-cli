@@ -21,6 +21,12 @@ interface LoginProps {
   onQuit: () => void;
   error: string | null;
   verifying: boolean;
+  /**
+   * Why the user is looking at this screen, when it is not simply "no token yet" —
+   * they logged out, or the session expired under them. Arriving back here with no
+   * explanation reads like the TUI lost their token on its own.
+   */
+  notice?: string | null;
 }
 
 /** Strip control characters a paste or stray key can smuggle into the field. */
@@ -33,7 +39,13 @@ function sanitize(input: string): string {
   return out;
 }
 
-export function Login({ onSubmit, onQuit, error, verifying }: LoginProps): React.ReactElement {
+export function Login({
+  onSubmit,
+  onQuit,
+  error,
+  verifying,
+  notice,
+}: LoginProps): React.ReactElement {
   const { columns, rows } = useTerminalSize();
   const [stage, setStage] = useState<Stage>("menu");
   const [choice, setChoice] = useState(0);
@@ -81,7 +93,11 @@ export function Login({ onSubmit, onQuit, error, verifying }: LoginProps): React
       <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1}>
         {stage === "menu" ? (
           <Box flexDirection="column" marginTop={1}>
-            <Text dimColor>尚未配置开发者 Token，请先登入。</Text>
+            {notice ? (
+              <Text color="yellow">{notice}</Text>
+            ) : (
+              <Text dimColor>尚未配置开发者 Token，请先登入。</Text>
+            )}
             <Box flexDirection="column" marginTop={1}>
               <Text inverse={choice === 0}>{choice === 0 ? "› " : "  "}配置 Token 登入</Text>
               <Text inverse={choice === 1}>{choice === 1 ? "› " : "  "}退出</Text>

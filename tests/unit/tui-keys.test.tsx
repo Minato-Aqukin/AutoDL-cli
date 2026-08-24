@@ -7,8 +7,8 @@ import type { DashboardRow } from "../../src/tui/data.js";
  * Key bindings for the destructive action.
  *
  * Release wipes an instance permanently. It used to sit on a bare capital `D`, one
- * slipped shift away from a key that does nothing — now it needs Ctrl+D, and a plain
- * `D` must do nothing at all.
+ * slipped shift away from a key that does nothing — now it needs ctrl, and neither a
+ * plain `d` nor a plain `D` may do anything at all.
  */
 
 const row: DashboardRow = {
@@ -47,6 +47,7 @@ vi.mock("../../src/tui/data.js", async (importOriginal) => {
       rows: [row],
       loading: false,
       error: null,
+      authError: null,
       lastUpdated: Date.now(),
       refresh: vi.fn(),
       snapshotFor: () => undefined,
@@ -77,9 +78,12 @@ beforeEach(() => {
   destroy.mockReset();
 });
 
+const mount = () =>
+  render(<App client={client} token={TOKEN} tokenSource="config" onLogout={vi.fn()} />);
+
 describe("release binding", () => {
-  it("opens the confirmation on Ctrl+D", async () => {
-    const { stdin, lastFrame } = render(<App client={client} token={TOKEN} />);
+  it("opens the confirmation on ctrl+d", async () => {
+    const { stdin, lastFrame } = mount();
     await flush();
     stdin.write(CTRL_D);
     await flush();
@@ -88,7 +92,7 @@ describe("release binding", () => {
 
   it("does nothing on a plain capital D", async () => {
     // The old binding. A shift-slip must not put a wipe-everything prompt on screen.
-    const { stdin, lastFrame } = render(<App client={client} token={TOKEN} />);
+    const { stdin, lastFrame } = mount();
     await flush();
     stdin.write("D");
     await flush();
@@ -96,7 +100,7 @@ describe("release binding", () => {
   });
 
   it("does nothing on a plain lowercase d", async () => {
-    const { stdin, lastFrame } = render(<App client={client} token={TOKEN} />);
+    const { stdin, lastFrame } = mount();
     await flush();
     stdin.write("d");
     await flush();
@@ -104,18 +108,19 @@ describe("release binding", () => {
   });
 
   it("still requires a confirmation before releasing anything", async () => {
-    const { stdin } = render(<App client={client} token={TOKEN} />);
+    const { stdin } = mount();
     await flush();
     stdin.write(CTRL_D);
     await flush();
     expect(destroy).not.toHaveBeenCalled();
   });
 
-  it("advertises Ctrl+D rather than D in the key hints", async () => {
-    const { lastFrame } = render(<App client={client} token={TOKEN} />);
+  it("advertises the binding with a lowercase letter, so it does not read as shifted", async () => {
+    const { lastFrame } = mount();
     await flush();
     const out = plain(lastFrame());
-    expect(out).toContain("Ctrl+D 释放");
+    expect(out).toContain("ctrl+d 释放");
+    expect(out).not.toContain("Ctrl");
     expect(out).not.toContain("· D 释放");
   });
 });

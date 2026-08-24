@@ -9,6 +9,7 @@ import {
   powerOnInstance,
   releaseInstance,
 } from "../core/endpoints/instance.js";
+import { isAuthError } from "../core/errors.js";
 import { estimateCost } from "../core/money.js";
 import type { Instance, InstanceSnapshot } from "../core/schemas.js";
 import { waitForShutdown } from "../core/waiters.js";
@@ -76,6 +77,11 @@ export interface InstancesState {
   /** Last error, kept visible without clearing the table — a dashboard that blanks on a
    *  transient failure is worse than one showing slightly stale data. */
   error: string | null;
+  /**
+   * Set once the API has rejected the token. Distinct from `error` because it is not
+   * something a retry can fix: the session is over, and the caller has to say so.
+   */
+  authError: string | null;
   lastUpdated: number | null;
   refresh: () => void;
   /** Snapshot for one instance, fetched on demand and cached. */
@@ -97,6 +103,7 @@ export function useInstances(
   const [snapshots, setSnapshots] = useState<Record<string, InstanceSnapshot>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
   const mounted = useRef(true);
   /** Guards against a slow poll overlapping the next tick or a manual refresh. */
@@ -122,7 +129,10 @@ export function useInstances(
       setError(null);
       setLastUpdated(Date.now());
     } catch (err) {
-      if (mounted.current) setError((err as Error).message);
+      if (mounted.current) {
+        setError((err as Error).message);
+        if (isAuthError(err)) setAuthError((err as Error).message);
+      }
     } finally {
       inFlight.current = false;
       if (mounted.current) setLoading(false);
@@ -134,11 +144,14 @@ export function useInstances(
   }, [load]);
 
   useEffect(() => {
+    // A dead token makes every further request a guaranteed 401; polling on would only
+    // spam the API behind whatever the caller shows the user.
+    if (authError) return;
     void load();
     if (paused) return;
     const timer = setInterval(() => void load(), intervalMs);
     return () => clearInterval(timer);
-  }, [load, intervalMs, paused]);
+  }, [load, intervalMs, paused, authError]);
 
   const loadSnapshot = useCallback(
     (uuid: string) => {
@@ -159,6 +172,7 @@ export function useInstances(
     rows,
     loading,
     error,
+    authError,
     lastUpdated,
     refresh,
     snapshotFor: (uuid) => snapshots[uuid],

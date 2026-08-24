@@ -49,9 +49,18 @@ being saved, and you land on the dashboard. Once configured, `autodl` goes strai
 
 A live table of your instances: status, GPU, region, **how long each has been powered on
 and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
-detail, `s` start, `x` stop, `c` copy the SSH command to the clipboard, `Ctrl+D` release, `g` GPU stock,
-`n` new instance, `r` refresh, `q` quit. Release sits on Ctrl+D rather than a bare key
-because it wipes the instance permanently.
+detail, `s` start, `x` stop, `c` copy the SSH command to the clipboard, `ctrl+d` release, `g` GPU stock,
+`n` new instance, `r` refresh, `ctrl+l` log out, `q` quit. The two that change or destroy
+something take ctrl rather than a bare key; shift makes no difference to either, and the
+hints are printed all-lowercase so they do not read as bindings you hold shift for.
+
+`ctrl+d` release wipes the instance permanently, which is why it is not a bare `d`.
+
+`ctrl+l` clears the saved token and returns to the login screen, after a confirmation — and
+it says so when `AUTODL_TOKEN` or `--token` will outrank whatever you save next. If the
+API rejects the token while the dashboard is open — expired, reset, verification lapsed —
+polling stops and the same login screen is one keystroke away, rather than leaving a
+frozen table above an endless stream of 401s.
 
 It fills the terminal and shows your account id and balance in the header. Copying with
 `c` puts only the SSH command on the clipboard — never the root password, which any
