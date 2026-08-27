@@ -20,15 +20,15 @@
 |---|---|---|
 | **CLI** | 人 | `autodl create --gpu 4090 --ttl 2h` |
 | **MCP server** | Claude Code、Cursor、Cline… | `autodl mcp`（stdio） |
-| **SDK** | Node 程序 | `import { createInstance } from "@minatoaqukin/autodl-cli"` |
+| **SDK** | Node 程序 | `import { createInstance } from "@minato-aqukin/autodl-cli"` |
 
 每个命令都支持 `--json`，输出结构稳定、退出码有明确语义，agent 无需解析自然语言就能判断结果。
 
 ## 安装
 
 ```bash
-npm install -g @minatoaqukin/autodl-cli   # 之后直接用 autodl 命令
-npx @minatoaqukin/autodl-cli <command>    # 或者不安装直接用
+npm install -g @minato-aqukin/autodl-cli   # 之后直接用 autodl 命令
+npx @minato-aqukin/autodl-cli <command>    # 或者不安装直接用
 ```
 
 需要 Node.js 22 及以上。
@@ -116,7 +116,7 @@ autodl run "python train.py" \
 ### Claude Code
 
 ```bash
-claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp
+claude mcp add autodl -- npx -y @minato-aqukin/autodl-cli mcp
 ```
 
 ### Cursor / Cline / 任意 MCP 客户端
@@ -126,7 +126,7 @@ claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp
   "mcpServers": {
     "autodl": {
       "command": "npx",
-      "args": ["-y", "@minatoaqukin/autodl-cli", "mcp"],
+      "args": ["-y", "@minato-aqukin/autodl-cli", "mcp"],
       "env": { "AUTODL_TOKEN": "你的Token" }
     }
   }
@@ -298,7 +298,7 @@ import {
   execCommand,
   powerOffInstance,
   waitForRunning,
-} from "@minatoaqukin/autodl-cli";
+} from "@minato-aqukin/autodl-cli";
 
 const client = new AutoDLClient({ token: process.env.AUTODL_TOKEN! });
 

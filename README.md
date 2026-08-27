@@ -23,7 +23,7 @@ backed by the same core:
 |---|---|---|
 | **CLI** | humans | `autodl create --gpu 4090 --ttl 2h` |
 | **MCP server** | Claude Code, Cursor, Cline, … | `autodl mcp` over stdio |
-| **SDK** | Node programs | `import { createInstance } from "@minatoaqukin/autodl-cli"` |
+| **SDK** | Node programs | `import { createInstance } from "@minato-aqukin/autodl-cli"` |
 
 Every command speaks `--json` with a stable schema and a documented exit code, so an
 agent can branch on the result without parsing prose.
@@ -31,8 +31,8 @@ agent can branch on the result without parsing prose.
 ## Install
 
 ```bash
-npm install -g @minatoaqukin/autodl-cli   # then: autodl <command>
-npx @minatoaqukin/autodl-cli <command>    # or without installing
+npm install -g @minato-aqukin/autodl-cli   # then: autodl <command>
+npx @minato-aqukin/autodl-cli <command>    # or without installing
 ```
 
 Requires Node.js 22+.
@@ -128,7 +128,7 @@ downloads the results, and powers the instance off — including on Ctrl-C.
 ### Claude Code
 
 ```bash
-claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp
+claude mcp add autodl -- npx -y @minato-aqukin/autodl-cli mcp
 ```
 
 ### Cursor / Cline / any MCP client
@@ -138,7 +138,7 @@ claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp
   "mcpServers": {
     "autodl": {
       "command": "npx",
-      "args": ["-y", "@minatoaqukin/autodl-cli", "mcp"],
+      "args": ["-y", "@minato-aqukin/autodl-cli", "mcp"],
       "env": { "AUTODL_TOKEN": "your-token" }
     }
   }
@@ -319,7 +319,7 @@ import {
   execCommand,
   powerOffInstance,
   waitForRunning,
-} from "@minatoaqukin/autodl-cli";
+} from "@minato-aqukin/autodl-cli";
 
 const client = new AutoDLClient({ token: process.env.AUTODL_TOKEN! });
 
