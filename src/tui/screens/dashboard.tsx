@@ -129,7 +129,8 @@ function columnsFor(width: number): Column<DashboardRow>[] {
  * costs the bottom of the frame, which Ink drops without a word.
  */
 const STATUS_ROWS = 4;
-const PANEL_CHROME = 3;
+/** The instance panel's border, its column labels, and the rule under them. */
+const PANEL_CHROME = 4;
 const METRIC_ROWS = 6;
 /** A panel's border plus its horizontal padding. */
 const PANEL_PADDING = 4;

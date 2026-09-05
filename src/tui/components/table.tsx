@@ -79,6 +79,23 @@ interface TableProps<T> {
 export const contentWidth = <T,>(columns: Column<T>[]): number =>
   1 + columns.reduce((sum, column) => sum + column.width + 1, 0);
 
+/**
+ * Solid under the header, dashed between rows.
+ *
+ * Two different jobs, so two different weights: the first says where the labels stop and
+ * the data starts, the second only tells one instance from the next.
+ */
+const HEADER_RULE = "─";
+const ROW_RULE = "┈";
+
+function Rule({ width, char }: { width: number; char: string }): React.ReactElement {
+  return (
+    <Box paddingX={1}>
+      <Text dimColor>{char.repeat(width)}</Text>
+    </Box>
+  );
+}
+
 export function Table<T>({
   columns,
   rows,
@@ -116,18 +133,14 @@ export function Table<T>({
           </Text>
         ))}
       </Box>
+      <Rule width={contentWidth(columns)} char={HEADER_RULE} />
       {window.map((row, offset) => {
         const index = start + offset;
         const selected = index === selectedIndex;
         return (
           <Box key={keyFor(row)} flexDirection="column">
-            {/* Between rows only, never above the first: a rule under the header would
-                read as a second header instead of as a divider. */}
-            {rules && offset > 0 ? (
-              <Box paddingX={1}>
-                <Text dimColor>{"┈".repeat(contentWidth(columns))}</Text>
-              </Box>
-            ) : null}
+            {/* Between rows only. The header already has its own, heavier rule above. */}
+            {rules && offset > 0 ? <Rule width={contentWidth(columns)} char={ROW_RULE} /> : null}
             <Box paddingX={1}>
               <Text inverse={selected}>{selected ? CURSOR.marker : CURSOR.blank}</Text>
               {columns.map((column) => {
