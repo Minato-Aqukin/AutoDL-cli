@@ -36,7 +36,11 @@ const BRAND_BLUE = "#2B6BF5";
 
 const ART_COLUMNS = (WORDMARK[0] as string).length;
 /** Art plus the account column plus the frame. Below this, fall back to one line. */
-const MIN_COLUMNS = ART_COLUMNS + 21;
+export const MIN_COLUMNS = ART_COLUMNS + 21;
+
+/** Rows the header occupies, so the dashboard can budget the space it is left. */
+export const headerRows = (columns: number): number =>
+  columns < MIN_COLUMNS ? 3 : WORDMARK.length + 2;
 
 interface HeaderProps {
   subtitle: string;

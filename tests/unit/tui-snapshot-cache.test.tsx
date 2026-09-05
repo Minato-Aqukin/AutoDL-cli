@@ -42,6 +42,7 @@ const state = vi.hoisted(() => ({
   startedAt: "2026-09-05T10:00:00Z",
   port: 34222,
   password: "first-password",
+  cpu: 12,
 }));
 
 vi.mock("../../src/core/endpoints/instance.js", async (importOriginal) => {
@@ -55,6 +56,7 @@ vi.mock("../../src/core/endpoints/instance.js", async (importOriginal) => {
         ssh_port: state.port,
         root_password: state.password,
         ssh_command: `ssh -p ${state.port} root@connect.xxx.autodl.com`,
+        usage_info: { ...snapshotResponse.data.usage_info, cpu_usage_percent: state.cpu },
       }),
     ),
     getInstanceStatus: vi.fn(async () => "running"),
@@ -94,7 +96,36 @@ beforeEach(() => {
   state.startedAt = BOOT_ONE;
   state.port = 34222;
   state.password = "first-password";
+  state.cpu = 12;
   copied.mockReset();
+});
+
+describe("the resource panel is a live view", () => {
+  it("re-samples usage on a refresh instead of holding the first reading", async () => {
+    // The panel used to be fed a snapshot fetched once and cached forever, which meant a
+    // CPU bar frozen at whatever the instance happened to be doing when it was opened.
+    const { stdin, lastFrame } = mount();
+    await wait(80);
+    expect(plain(lastFrame())).toContain("12.0%");
+
+    state.cpu = 87;
+    stdin.write("r");
+    await wait(120);
+    const out = plain(lastFrame());
+    expect(out).toContain("87.0%");
+    expect(out).not.toContain("12.0%");
+  });
+
+  it("accumulates the readings into a history the sparkline can draw", async () => {
+    const { stdin, lastFrame } = mount();
+    await wait(80);
+    state.cpu = 87;
+    stdin.write("r");
+    await wait(120);
+
+    // Two samples so far: a low one and a high one, in that order.
+    expect(plain(lastFrame())).toMatch(/[▁▂][▇█]/);
+  });
 });
 
 describe("SSH details across a power cycle", () => {

@@ -103,14 +103,31 @@ export function App({
   const [balanceError, setBalanceError] = useState<string | null>(null);
   /** Non-null once the token has been rejected: the session is over, not merely erroring. */
   const [expired, setExpired] = useState<string | null>(null);
+  /**
+   * The running instance whose snapshot the poll keeps fresh.
+   *
+   * Trails the selection by one render, because it has to be known before the hook that
+   * produces the list the selection indexes into. Harmless: moving the cursor fetches
+   * immediately (below), and the poll takes over from the next tick.
+   */
+  const [watched, setWatched] = useState<string | undefined>(undefined);
   const { columns, rows: terminalRows } = useTerminalSize();
   const identity = useMemo(() => identityFromToken(token), [token]);
 
   // Polling pauses whenever a modal owns the screen, so a refresh can't reorder rows
   // under a confirmation the user is reading.
   const paused = view === "create" || pending !== null || expired !== null;
-  const { rows, loading, error, authError, lastUpdated, refresh, snapshotFor, loadSnapshot } =
-    useInstances(client, { paused });
+  const {
+    rows,
+    loading,
+    error,
+    authError,
+    lastUpdated,
+    refresh,
+    snapshotFor,
+    historyFor,
+    loadSnapshot,
+  } = useInstances(client, { paused, watch: watched });
 
   // Any rejected token ends the session, whichever request happened to discover it.
   const noteAuthFailure = useCallback((err: unknown): void => {
@@ -135,13 +152,17 @@ export function App({
     if (view === "detail" && !row) setView("dashboard");
   }, [view, row]);
 
-  // Rates come only from a running instance's snapshot; fetch just the selected one
-  // rather than N snapshots per poll.
+  const selectedUuid = row?.instance.uuid;
+  const selectedRunning = row?.instance.status === "running";
+
+  // The poll keeps the watched instance's snapshot fresh (see `watch` above), which is
+  // what makes the resource panel a live view rather than one reading frozen at the
+  // moment it was first opened. This covers the other case: moving the cursor, where
+  // waiting out the rest of the interval would leave the panel blank.
   useEffect(() => {
-    if (row && row.instance.status === "running" && !snapshotFor(row.instance.uuid)) {
-      loadSnapshot(row.instance.uuid);
-    }
-  }, [row, snapshotFor, loadSnapshot]);
+    setWatched(selectedRunning ? selectedUuid : undefined);
+    if (selectedUuid && selectedRunning) loadSnapshot(selectedUuid);
+  }, [selectedUuid, selectedRunning, loadSnapshot]);
 
   // Balance is the number that changes behaviour, so it refreshes on its own cadence —
   // slower than the instance list, since it moves far less often.
@@ -371,6 +392,9 @@ export function App({
               ? "↑↓ 移动 · r 刷新 · Esc 返回"
               : DASHBOARD_KEYS;
 
+  // Mirrors the render chain below: everything else takes the screen from the dashboard.
+  const showsDashboard = !expired && !pending && view === "dashboard";
+
   return (
     // Claim the entire terminal so the dashboard is a fixed full-screen surface rather
     // than a block that grows and shrinks with its content.
@@ -442,10 +466,21 @@ export function App({
           <Text dimColor>按任意键返回</Text>
         </Box>
       ) : (
-        <Dashboard rows={rows} selectedIndex={selectedIndex} loading={loading} />
+        <Dashboard
+          rows={rows}
+          selectedIndex={selectedIndex}
+          loading={loading}
+          snapshot={selectedUuid ? snapshotFor(selectedUuid) : undefined}
+          history={selectedUuid ? historyFor(selectedUuid) : undefined}
+          balance={balance}
+          width={columns}
+          height={terminalRows}
+        />
       )}
 
-      <Box flexGrow={1} />
+      {/* The dashboard fills the frame itself; anything else is a block that needs
+          pushing up so the key hints stay pinned to the bottom. */}
+      {showsDashboard ? null : <Box flexGrow={1} />}
 
       <StatusBar
         rows={rows}

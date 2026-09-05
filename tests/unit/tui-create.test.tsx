@@ -49,6 +49,7 @@ vi.mock("../../src/tui/data.js", async (importOriginal) => {
       lastUpdated: Date.now(),
       refresh: vi.fn(),
       snapshotFor: () => undefined,
+      historyFor: () => undefined,
       loadSnapshot: vi.fn(),
     }),
   };

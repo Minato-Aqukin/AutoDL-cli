@@ -72,6 +72,7 @@ vi.mock("../../src/tui/data.js", async (importOriginal) => {
         lastUpdated: Date.now(),
         refresh: useCallback(() => setRows([...state.rows]), []),
         snapshotFor: () => undefined,
+        historyFor: () => undefined,
         loadSnapshot: vi.fn(),
       };
     },
@@ -105,7 +106,7 @@ const hintLine = (frame: string | undefined): string => {
 const highlighted = (frame: string | undefined): string =>
   plain(frame)
     .split("\n")
-    .find((line) => line.trimStart().startsWith("›")) ?? "";
+    .find((line) => line.includes("›")) ?? "";
 
 const TOKEN = [
   "header",

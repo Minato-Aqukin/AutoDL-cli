@@ -32,7 +32,7 @@ function pad(value: string, width: number): string {
 }
 
 /** Cut to `width` columns, counting CJK as two. */
-function clip(value: string, width: number): string {
+export function clip(value: string, width: number): string {
   if (stringWidth(value) <= width) return value;
   let out = "";
   for (const char of value) {
@@ -48,6 +48,14 @@ interface TableProps<T> {
   selectedIndex: number;
   keyFor: (row: T) => string;
   emptyMessage: string;
+  /**
+   * Cap on visible data rows. The window follows the selection.
+   *
+   * Without it a list longer than the terminal is not truncated but *squeezed out* of
+   * the frame from the bottom — Ink neither scrolls nor complains — taking the panels
+   * and the key hints below it along too.
+   */
+  maxRows?: number;
 }
 
 export function Table<T>({
@@ -56,6 +64,7 @@ export function Table<T>({
   selectedIndex,
   keyFor,
   emptyMessage,
+  maxRows,
 }: TableProps<T>): React.ReactElement {
   if (rows.length === 0) {
     return (
@@ -64,6 +73,15 @@ export function Table<T>({
       </Box>
     );
   }
+
+  // Centred on the selection where the list allows it, so the row being acted on is
+  // always on screen and the rows around it stay stable while the cursor moves.
+  const visible = maxRows && maxRows > 0 ? Math.min(maxRows, rows.length) : rows.length;
+  const start = Math.max(
+    0,
+    Math.min(selectedIndex - Math.floor((visible - 1) / 2), rows.length - visible),
+  );
+  const window = rows.slice(start, start + visible);
 
   return (
     <Box flexDirection="column">
@@ -75,7 +93,8 @@ export function Table<T>({
           </Text>
         ))}
       </Box>
-      {rows.map((row, index) => {
+      {window.map((row, offset) => {
+        const index = start + offset;
         const selected = index === selectedIndex;
         return (
           <Box key={keyFor(row)} paddingX={1}>

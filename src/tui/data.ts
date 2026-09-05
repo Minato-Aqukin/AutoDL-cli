@@ -86,13 +86,29 @@ export interface InstancesState {
   refresh: () => void;
   /** Snapshot for one instance, fetched on demand and cached. */
   snapshotFor: (uuid: string) => InstanceSnapshot | undefined;
+  /** Recent CPU and memory samples for one instance, for the dashboard's sparklines. */
+  historyFor: (uuid: string) => UsageHistory | undefined;
   loadSnapshot: (uuid: string) => void;
+}
+
+/** Percentages, oldest sample first. Empty until the first snapshot lands. */
+export interface UsageHistory {
+  cpu: number[];
+  mem: number[];
 }
 
 export interface PollOptions {
   intervalMs?: number;
   /** Suspends polling while a modal owns the screen. */
   paused?: boolean;
+  /**
+   * Instance whose snapshot is refreshed alongside each list poll.
+   *
+   * One at a time, and only the one on screen: the dashboard's gauges are a live view,
+   * but snapshotting every instance every tick would be N requests for figures nothing
+   * is displaying.
+   */
+  watch?: string | undefined;
 }
 
 /**
@@ -106,11 +122,29 @@ export interface PollOptions {
 interface CachedSnapshot {
   startedAt: string | null;
   snapshot: InstanceSnapshot;
+  /**
+   * Samples accumulated over this power-on, one per poll.
+   *
+   * Held beside the snapshot so it expires with it: a chart that carried the previous
+   * boot's load across a restart would describe work that is no longer running.
+   */
+  history: UsageHistory;
 }
+
+/**
+ * How many samples a sparkline keeps.
+ *
+ * At the 10s poll interval this is a little over five minutes of history, which is long
+ * enough to tell "the job is running" from "the job finished and the meter is still on".
+ */
+const HISTORY_POINTS = 32;
+
+const appendSample = (series: number[], value: number | null): number[] =>
+  value === null ? series : [...series, value].slice(-HISTORY_POINTS);
 
 export function useInstances(
   client: AutoDLClient,
-  { intervalMs = 10_000, paused = false }: PollOptions = {},
+  { intervalMs = 10_000, paused = false, watch }: PollOptions = {},
 ): InstancesState {
   const [instances, setInstances] = useState<Instance[]>([]);
   const [snapshots, setSnapshots] = useState<Record<string, CachedSnapshot>>({});
@@ -129,6 +163,47 @@ export function useInstances(
     };
   }, []);
 
+  // Read through a ref so `loadSnapshot` keeps one identity for the life of the hook.
+  // It is an effect dependency in the dashboard, and a function that changed on every
+  // poll would re-fire that effect on every poll for reasons unrelated to the selection.
+  const instancesRef = useRef<Instance[]>(instances);
+  instancesRef.current = instances;
+  const watchRef = useRef<string | undefined>(watch);
+  watchRef.current = watch;
+
+  const loadSnapshot = useCallback(
+    (uuid: string) => {
+      const instance = instancesRef.current.find((i) => i.uuid === uuid);
+      if (instance?.status !== "running") return;
+      const startedAt = instance.startedAt;
+      getInstanceSnapshot(client, uuid)
+        .then((snapshot) =>
+          setSnapshots((prev) => {
+            // Only a cache entry from this same power-on may carry its history forward.
+            const previous = prev[uuid];
+            const carried =
+              previous && previous.startedAt === startedAt
+                ? previous.history
+                : { cpu: [], mem: [] };
+            return {
+              ...prev,
+              [uuid]: {
+                startedAt,
+                snapshot,
+                history: {
+                  cpu: appendSample(carried.cpu, snapshot.usage.cpuPercent),
+                  mem: appendSample(carried.mem, snapshot.usage.memPercent),
+                },
+              },
+            };
+          }),
+        )
+        // A missing snapshot only costs a price column; never surface it as an error.
+        .catch(() => undefined);
+    },
+    [client],
+  );
+
   // Exposed directly rather than via a counter the effect happens to depend on:
   // refreshing is just "load again", and expressing it that way keeps the manual
   // refresh key and the interval on one code path.
@@ -139,8 +214,14 @@ export function useInstances(
       const next = await listAllInstances(client);
       if (!mounted.current) return;
       setInstances(next);
+      // Updated here as well as on render: the watched instance's snapshot is fetched
+      // below, in this same tick, and it has to see the statuses that just arrived
+      // rather than the ones from the previous poll.
+      instancesRef.current = next;
       setError(null);
       setLastUpdated(Date.now());
+      // One sample per poll, so the dashboard's gauges track the list they sit under.
+      if (watchRef.current) loadSnapshot(watchRef.current);
     } catch (err) {
       if (mounted.current) {
         setError((err as Error).message);
@@ -150,7 +231,7 @@ export function useInstances(
       inFlight.current = false;
       if (mounted.current) setLoading(false);
     }
-  }, [client]);
+  }, [client, loadSnapshot]);
 
   const refresh = useCallback(() => {
     void load();
@@ -166,27 +247,17 @@ export function useInstances(
     return () => clearInterval(timer);
   }, [load, intervalMs, paused, authError]);
 
-  const loadSnapshot = useCallback(
-    (uuid: string) => {
-      const instance = instances.find((i) => i.uuid === uuid);
-      if (instance?.status !== "running") return;
-      const startedAt = instance.startedAt;
-      getInstanceSnapshot(client, uuid)
-        .then((snapshot) => setSnapshots((prev) => ({ ...prev, [uuid]: { startedAt, snapshot } })))
-        // A missing snapshot only costs a price column; never surface it as an error.
-        .catch(() => undefined);
-    },
-    [client, instances],
-  );
-
-  // Serve a cached snapshot only for the power-on it was taken during. Returning
-  // undefined instead of stale data also re-arms the caller's fetch-on-demand effect,
-  // so the next poll replaces it with credentials that work.
-  const freshSnapshot = (instance: Instance): InstanceSnapshot | undefined => {
+  // Serve a cached entry only for the power-on it was taken during. Returning undefined
+  // instead of stale data also re-arms the caller's fetch-on-demand effect, so the next
+  // poll replaces it with credentials that work.
+  const freshEntry = (instance: Instance): CachedSnapshot | undefined => {
     const cached = snapshots[instance.uuid];
     if (!cached || instance.status !== "running") return undefined;
-    return cached.startedAt === instance.startedAt ? cached.snapshot : undefined;
+    return cached.startedAt === instance.startedAt ? cached : undefined;
   };
+
+  const freshSnapshot = (instance: Instance): InstanceSnapshot | undefined =>
+    freshEntry(instance)?.snapshot;
 
   const now = Date.now();
   const rows = instances.map((instance) => buildRow(instance, freshSnapshot(instance), now));
@@ -201,6 +272,10 @@ export function useInstances(
     snapshotFor: (uuid) => {
       const instance = instances.find((i) => i.uuid === uuid);
       return instance ? freshSnapshot(instance) : undefined;
+    },
+    historyFor: (uuid) => {
+      const instance = instances.find((i) => i.uuid === uuid);
+      return instance ? freshEntry(instance)?.history : undefined;
     },
     loadSnapshot,
   };
