@@ -95,12 +95,25 @@ export interface PollOptions {
   paused?: boolean;
 }
 
+/**
+ * A snapshot plus the power-on it describes.
+ *
+ * AutoDL rotates the SSH host, port and root password on every power cycle, so a
+ * snapshot outlives its own contents: cached across a stop/start it hands back
+ * credentials that no longer open anything, and a password the user would paste
+ * somewhere. `startedAt` is what tells the two power-ons apart.
+ */
+interface CachedSnapshot {
+  startedAt: string | null;
+  snapshot: InstanceSnapshot;
+}
+
 export function useInstances(
   client: AutoDLClient,
   { intervalMs = 10_000, paused = false }: PollOptions = {},
 ): InstancesState {
   const [instances, setInstances] = useState<Instance[]>([]);
-  const [snapshots, setSnapshots] = useState<Record<string, InstanceSnapshot>>({});
+  const [snapshots, setSnapshots] = useState<Record<string, CachedSnapshot>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -157,16 +170,26 @@ export function useInstances(
     (uuid: string) => {
       const instance = instances.find((i) => i.uuid === uuid);
       if (instance?.status !== "running") return;
+      const startedAt = instance.startedAt;
       getInstanceSnapshot(client, uuid)
-        .then((snapshot) => setSnapshots((prev) => ({ ...prev, [uuid]: snapshot })))
+        .then((snapshot) => setSnapshots((prev) => ({ ...prev, [uuid]: { startedAt, snapshot } })))
         // A missing snapshot only costs a price column; never surface it as an error.
         .catch(() => undefined);
     },
     [client, instances],
   );
 
+  // Serve a cached snapshot only for the power-on it was taken during. Returning
+  // undefined instead of stale data also re-arms the caller's fetch-on-demand effect,
+  // so the next poll replaces it with credentials that work.
+  const freshSnapshot = (instance: Instance): InstanceSnapshot | undefined => {
+    const cached = snapshots[instance.uuid];
+    if (!cached || instance.status !== "running") return undefined;
+    return cached.startedAt === instance.startedAt ? cached.snapshot : undefined;
+  };
+
   const now = Date.now();
-  const rows = instances.map((instance) => buildRow(instance, snapshots[instance.uuid], now));
+  const rows = instances.map((instance) => buildRow(instance, freshSnapshot(instance), now));
 
   return {
     rows,
@@ -175,7 +198,10 @@ export function useInstances(
     authError,
     lastUpdated,
     refresh,
-    snapshotFor: (uuid) => snapshots[uuid],
+    snapshotFor: (uuid) => {
+      const instance = instances.find((i) => i.uuid === uuid);
+      return instance ? freshSnapshot(instance) : undefined;
+    },
     loadSnapshot,
   };
 }

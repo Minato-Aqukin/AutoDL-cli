@@ -1,6 +1,6 @@
 import { Box, render, Text, useApp, useInput } from "ink";
 import type React from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   clearToken,
   configPath,
@@ -9,7 +9,7 @@ import {
   tryResolveToken,
   updateConfig,
 } from "../config/store.js";
-import { parseCudaVersion } from "../core/catalog.js";
+import { findBaseImage, parseCudaVersion } from "../core/catalog.js";
 import { AutoDLClient } from "../core/client.js";
 import { getBalance } from "../core/endpoints/account.js";
 import { createInstance } from "../core/endpoints/instance.js";
@@ -21,7 +21,7 @@ import { composeStartCommand, recordTTL } from "../guard/ttl.js";
 import { configureOutput, isJson, isVerbose } from "../output/format.js";
 import { identityFromToken, tokenOverrideNote } from "./account.js";
 import { copyToClipboard } from "./clipboard.js";
-import { Confirm } from "./components/confirm.js";
+import { CONFIRM_KEYS, Confirm } from "./components/confirm.js";
 import { Header } from "./components/header.js";
 import { StatusBar } from "./components/statusbar.js";
 import {
@@ -123,7 +123,17 @@ export function App({
     if (authError) setExpired((current) => current ?? authError);
   }, [authError]);
 
-  const row = rows[Math.min(selected, Math.max(0, rows.length - 1))];
+  // Clamped once and used for both the highlight and the actions. Clamping only the
+  // lookup let the two disagree: release an instance while sitting on the last row and
+  // the table highlighted nothing while `s`/`x` quietly operated on its neighbour.
+  const selectedIndex = Math.min(selected, Math.max(0, rows.length - 1));
+  const row = rows[selectedIndex];
+
+  // A detail screen whose instance is gone renders the dashboard underneath the detail
+  // title and the detail key hints. Leave rather than show that.
+  useEffect(() => {
+    if (view === "detail" && !row) setView("dashboard");
+  }, [view, row]);
 
   // Rates come only from a running instance's snapshot; fetch just the selected one
   // rather than N snapshots per poll.
@@ -160,10 +170,26 @@ export function App({
     };
   }, [client, expired, noteAuthFailure]);
 
+  /**
+   * Show a message for six seconds.
+   *
+   * The timer is tracked so each message gets its own full six seconds — an untracked
+   * one from an earlier action would fire mid-way through the next message and blank it
+   * — and so quitting does not leave a pending timer holding the event loop open, which
+   * kept the shell prompt away for up to six seconds after the TUI had already closed.
+   */
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flash = useCallback((message: string) => {
     setNotice(message);
-    setTimeout(() => setNotice(null), 6000);
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    noticeTimer.current = setTimeout(() => setNotice(null), 6000);
   }, []);
+  useEffect(
+    () => () => {
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    },
+    [],
+  );
 
   const act = useCallback(
     async (label: string, fn: () => Promise<string>) => {
@@ -199,13 +225,18 @@ export function App({
     async (draft: CreateDraft) => {
       setBusy(true);
       try {
+        // Derived from the image the wizard actually offered, exactly as `autodl create`
+        // does. Hardcoding 11.8 shipped every instance with that floor no matter which
+        // CUDA the chosen image advertised one screen earlier.
+        const image = findBaseImage(draft.imageUuid);
+        const startCommand = composeStartCommand(draft.ttlSeconds, undefined);
         const uuid = await createInstance(client, {
           gpuSpec: draft.spec.id,
           gpuNum: 1,
           imageUuid: draft.imageUuid,
-          cudaFrom: parseCudaVersion("11.8"),
+          cudaFrom: parseCudaVersion(image?.cuda ?? "11.8"),
           expandSystemDiskGb: 0,
-          startCommand: composeStartCommand(draft.ttlSeconds, undefined) as string,
+          ...(startCommand ? { startCommand } : {}),
         });
         recordTTL({ uuid, ttlSeconds: draft.ttlSeconds, inInstanceTimer: true });
         setView("dashboard");
@@ -224,8 +255,10 @@ export function App({
 
   useInput(
     (input, key) => {
-      if (busy && view !== "dashboard") return;
-
+      // An action in flight blocks only the keys that would start another one (see the
+      // `busy` guards below). It used to block every key on every screen but the
+      // dashboard, which meant an unrelated start/stop trapped the user on the detail
+      // screen — Esc included — until it finished.
       if (view === "help") {
         setView("dashboard");
         return;
@@ -237,7 +270,10 @@ export function App({
       if (view === "stock") {
         const max = toStockRows(stock, false).length;
         if (key.upArrow || input === "k") return setStockIndex((v) => Math.max(0, v - 1));
-        if (key.downArrow || input === "j") return setStockIndex((v) => Math.min(max - 1, v + 1));
+        // Floored at 0: an empty list makes `max - 1` negative, and the cursor then had
+        // to be walked back up from -1 before the first row would highlight.
+        if (key.downArrow || input === "j")
+          return setStockIndex((v) => Math.max(0, Math.min(max - 1, v + 1)));
         if (input === "r") return void loadStock();
         return;
       }
@@ -252,7 +288,7 @@ export function App({
       if (input === "?") return setView("help");
       if (key.upArrow || input === "k") return setSelected((v) => Math.max(0, v - 1));
       if (key.downArrow || input === "j")
-        return setSelected((v) => Math.min(rows.length - 1, v + 1));
+        return setSelected((v) => Math.max(0, Math.min(rows.length - 1, v + 1)));
       if (input === "r") return refresh();
       if (input === "n") return setView("create");
       // ctrl-modified, and behind a confirmation: an accidental logout costs a re-paste
@@ -269,12 +305,14 @@ export function App({
         return setView("detail");
       }
       if (input === "s") {
+        if (busy) return;
         return void act("开机", async () => {
           await startInstance(client, row.instance.uuid);
           return `✔ ${row.instance.uuid} 开机指令已发送`;
         });
       }
       if (input === "x") {
+        if (busy) return;
         return void act("关机", async () => {
           // Verified rather than assumed: power_off on a still-starting instance was
           // measured not to take effect, and a false "stopped" costs real money.
@@ -302,10 +340,36 @@ export function App({
         });
         return;
       }
-      if (isCtrl(input, key, "d")) return setPending({ kind: "release", row });
+      if (isCtrl(input, key, "d")) {
+        if (busy) return;
+        return setPending({ kind: "release", row });
+      }
     },
     { isActive: view !== "create" && pending === null && expired === null },
   );
+
+  /**
+   * What the bottom bar advertises — the keys of whoever owns the keyboard right now.
+   *
+   * The modal, the wizard and the help screen all take input away from the dashboard
+   * (see `isActive` above), so keying this off `view` alone printed `s 开机 · ctrl+d
+   * 释放 · q 退出` underneath a confirmation where `q` cancels and the rest do nothing.
+   */
+  const hints = expired
+    ? "Enter 重新登入 · q 退出"
+    : pending
+      ? CONFIRM_KEYS
+      : view === "create"
+        ? // Step-agnostic on purpose: the wizard's own line says what Enter does at this
+          // step, and only Esc is true at every one of them.
+          "Esc 取消"
+        : view === "help"
+          ? "按任意键返回"
+          : view === "detail"
+            ? "p 显示/隐藏密码 · Esc 返回"
+            : view === "stock"
+              ? "↑↓ 移动 · r 刷新 · Esc 返回"
+              : DASHBOARD_KEYS;
 
   return (
     // Claim the entire terminal so the dashboard is a fixed full-screen surface rather
@@ -378,7 +442,7 @@ export function App({
           <Text dimColor>按任意键返回</Text>
         </Box>
       ) : (
-        <Dashboard rows={rows} selectedIndex={selected} loading={loading} />
+        <Dashboard rows={rows} selectedIndex={selectedIndex} loading={loading} />
       )}
 
       <Box flexGrow={1} />
@@ -390,17 +454,7 @@ export function App({
         error={expired ? null : error}
         notice={notice}
         lastUpdated={lastUpdated}
-        hints={
-          expired
-            ? "Enter 重新登入 · q 退出"
-            : view === "dashboard"
-              ? DASHBOARD_KEYS
-              : view === "detail"
-                ? "p 显示/隐藏密码 · Esc 返回"
-                : view === "stock"
-                  ? "↑↓ 移动 · r 刷新 · Esc 返回"
-                  : ""
-        }
+        hints={hints}
       />
     </Box>
   );
