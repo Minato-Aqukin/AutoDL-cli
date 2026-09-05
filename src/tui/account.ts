@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import type { TokenResolution } from "../config/store.js";
 
 /**
  * Identity carried by the developer token itself.
@@ -33,4 +34,18 @@ export function identityFromToken(token: string): TokenIdentity {
   } catch {
     return empty;
   }
+}
+
+/**
+ * Warn when the token in the config file is not the one that will actually be used.
+ *
+ * Logging out clears the saved token, but a token supplied by the environment or by
+ * `--token` outranks it — so without this, someone logs out, pastes a fresh token, and
+ * silently keeps running on the dead one from the shell they started in.
+ */
+export function tokenOverrideNote(source: TokenResolution["source"]): string | null {
+  if (source === "env")
+    return "注意：环境变量 AUTODL_TOKEN 仍然生效，其优先级高于这里保存的 Token。";
+  if (source === "flag") return "注意：本次启动带了 --token 参数，其优先级高于这里保存的 Token。";
+  return null;
 }

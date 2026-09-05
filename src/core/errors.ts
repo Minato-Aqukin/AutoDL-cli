@@ -130,3 +130,14 @@ export function toAutoDLError(err: unknown): AutoDLError {
   }
   return new AutoDLError(String(err));
 }
+
+/**
+ * Whether a failure means "this token will not work", as opposed to a transient fault.
+ *
+ * Matched on the code rather than the class: an auth failure can be raised by the HTTP
+ * layer or mapped out of a 200-with-error-code envelope, and callers that react to an
+ * expired session — the TUI drops back to its login screen — must catch both.
+ */
+export function isAuthError(err: unknown): boolean {
+  return err instanceof AutoDLError && (err.code === "AUTH_INVALID" || err.code === "AUTH_MISSING");
+}

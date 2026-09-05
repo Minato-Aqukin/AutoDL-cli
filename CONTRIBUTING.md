@@ -73,9 +73,11 @@ Merging to `main` with a changeset present opens a release PR; merging that PR p
 
 Two one-time setup steps are needed before the publish step can succeed:
 
-1. An `NPM_TOKEN` repository secret with publish rights to the `@minatoaqukin` scope.
-   (The workflow also sets `NPM_CONFIG_PROVENANCE`, so the token must be granted from an
-   account with 2FA configured for automation.)
+1. An `NPM_TOKEN` repository secret holding a **granular access token** with
+   "bypass 2FA" enabled and read/write on the `@minato-aqukin` scope. Scope-level, not
+   package-level: a package-scoped token cannot create a package that does not exist yet.
+   Without the 2FA bypass npm rejects the publish with a 403 and never offers an OTP
+   challenge.
 2. Settings → Actions → General → Workflow permissions →
    **Allow GitHub Actions to create and approve pull requests**, otherwise changesets can
    push the release branch but cannot open the PR.

@@ -20,15 +20,15 @@
 |---|---|---|
 | **CLI** | 人 | `autodl create --gpu 4090 --ttl 2h` |
 | **MCP server** | Claude Code、Cursor、Cline… | `autodl mcp`（stdio） |
-| **SDK** | Node 程序 | `import { createInstance } from "@minatoaqukin/autodl-cli"` |
+| **SDK** | Node 程序 | `import { createInstance } from "@minato-aqukin/autodl-cli"` |
 
 每个命令都支持 `--json`，输出结构稳定、退出码有明确语义，agent 无需解析自然语言就能判断结果。
 
 ## 安装
 
 ```bash
-npm install -g @minatoaqukin/autodl-cli   # 之后直接用 autodl 命令
-npx @minatoaqukin/autodl-cli <command>    # 或者不安装直接用
+npm install -g @minato-aqukin/autodl-cli   # 之后直接用 autodl 命令
+npx @minato-aqukin/autodl-cli <command>    # 或者不安装直接用
 ```
 
 需要 Node.js 22 及以上。
@@ -43,9 +43,16 @@ autodl tui     # 交互式终端里直接敲 autodl 也进
 粘贴 Token 后会先向 API 验证再保存，然后直接进看板。已经配置过的，敲 `autodl` 直接进。
 
 一张会自己刷新的实例表：状态、GPU、地区、**已开机多久、大概花了多少钱**、TTL 还剩多少。
-快捷键：`↑↓` 移动、`Enter` 详情、`s` 开机、`x` 关机、`c` 复制 SSH 命令到剪贴板、`Ctrl+D` 释放、
-`g` 看 GPU 库存、`n` 新建、`r` 刷新、`q` 退出。释放放在 Ctrl+D 而不是单键，
-因为它会永久清空实例。
+快捷键：`↑↓` 移动、`Enter` 详情、`s` 开机、`x` 关机、`c` 复制 SSH 命令到剪贴板、`ctrl+d` 释放、
+`g` 看 GPU 库存、`n` 新建、`r` 刷新、`ctrl+l` 退出登录、`q` 退出。会改变或销毁东西的两个
+都带 ctrl 而不是单键；按不按 shift 都认，提示也统一小写显示，免得看起来像要按 shift。
+
+`ctrl+d` 释放会永久清空实例，所以它不是单个 `d`。
+
+`ctrl+l` 会在二次确认后清除本地 Token 并回到登录页；如果本次会话的 Token 来自 `AUTODL_TOKEN`
+或 `--token`，确认框会直说它的优先级高于接下来保存的 Token。看板开着时 Token 失效了
+（过期、被重置、实名状态变化），刷新会立刻停下，并给出一个回登录页的入口——
+而不是让你对着一张不再更新的表和刷不完的 401。
 
 界面占满终端，头部显示账号 ID 与余额。`c` 只把 **SSH 命令**写进剪贴板，**不含 root 密码**
 ——剪贴板任何进程都能读。没有剪贴板工具的环境（SSH 会话、容器）会退回 OSC 52 并如实说明，
@@ -109,7 +116,7 @@ autodl run "python train.py" \
 ### Claude Code
 
 ```bash
-claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp
+claude mcp add autodl -- npx -y @minato-aqukin/autodl-cli mcp
 ```
 
 ### Cursor / Cline / 任意 MCP 客户端
@@ -119,7 +126,7 @@ claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp
   "mcpServers": {
     "autodl": {
       "command": "npx",
-      "args": ["-y", "@minatoaqukin/autodl-cli", "mcp"],
+      "args": ["-y", "@minato-aqukin/autodl-cli", "mcp"],
       "env": { "AUTODL_TOKEN": "你的Token" }
     }
   }
@@ -291,7 +298,7 @@ import {
   execCommand,
   powerOffInstance,
   waitForRunning,
-} from "@minatoaqukin/autodl-cli";
+} from "@minato-aqukin/autodl-cli";
 
 const client = new AutoDLClient({ token: process.env.AUTODL_TOKEN! });
 

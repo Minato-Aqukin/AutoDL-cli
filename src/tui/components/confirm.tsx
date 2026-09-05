@@ -9,6 +9,14 @@ import { useState } from "react";
  * single keystroke. Defaults to "no", so a stray Enter cannot release an instance.
  */
 
+/**
+ * The keys this modal answers to.
+ *
+ * Exported because the status bar has to name them too while the modal is up, and two
+ * hand-written copies of a key list drift apart the moment one of them is edited.
+ */
+export const CONFIRM_KEYS = "←→ 切换 · Enter 确定 · y/n 直接选 · Esc 取消";
+
 interface ConfirmProps {
   title: string;
   detail?: string;
@@ -57,7 +65,7 @@ export function Confirm({
         <Text inverse={yes} color={yes ? "red" : undefined}>
           {` ${confirmLabel} `}
         </Text>
-        <Text dimColor>　←→ 切换 · Enter 确定 · y/n 直接选 · Esc 取消</Text>
+        <Text dimColor>　{CONFIRM_KEYS}</Text>
       </Box>
     </Box>
   );

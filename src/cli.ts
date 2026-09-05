@@ -66,7 +66,7 @@ export function buildProgram(): Command {
       "  autodl ls --json | jq '.data[].uuid'            供脚本与 agent 消费",
       "",
       "接入 agent（Claude Code）：",
-      "  claude mcp add autodl -- npx -y @minatoaqukin/autodl-cli mcp",
+      "  claude mcp add autodl -- npx -y @minato-aqukin/autodl-cli mcp",
     ].join("\n"),
   );
 

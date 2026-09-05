@@ -31,8 +31,17 @@ function pad(value: string, width: number): string {
   return spare > 0 ? " ".repeat(spare) : "";
 }
 
+/**
+ * The cursor cell every data row opens with.
+ *
+ * The header has to reserve it too. It did not, so every value in the table sat exactly
+ * one column to the right of the label naming it — uniformly, which is what made it read
+ * as "the columns are off" rather than as a missing character.
+ */
+const CURSOR = { marker: "›", blank: " " };
+
 /** Cut to `width` columns, counting CJK as two. */
-function clip(value: string, width: number): string {
+export function clip(value: string, width: number): string {
   if (stringWidth(value) <= width) return value;
   let out = "";
   for (const char of value) {
@@ -48,6 +57,43 @@ interface TableProps<T> {
   selectedIndex: number;
   keyFor: (row: T) => string;
   emptyMessage: string;
+  /**
+   * Cap on visible data rows. The window follows the selection.
+   *
+   * Without it a list longer than the terminal is not truncated but *squeezed out* of
+   * the frame from the bottom — Ink neither scrolls nor complains — taking the panels
+   * and the key hints below it along too.
+   */
+  maxRows?: number;
+  /**
+   * Draw a rule between rows.
+   *
+   * The caller decides, because each rule costs a row of the list — worth it for the
+   * handful of instances most accounts have, not worth it when the choice is between a
+   * rule and seeing the instance under it.
+   */
+  rules?: boolean;
+}
+
+/** Content columns a row occupies: the cursor cell plus each column and its gutter. */
+export const contentWidth = <T,>(columns: Column<T>[]): number =>
+  1 + columns.reduce((sum, column) => sum + column.width + 1, 0);
+
+/**
+ * Solid under the header, dashed between rows.
+ *
+ * Two different jobs, so two different weights: the first says where the labels stop and
+ * the data starts, the second only tells one instance from the next.
+ */
+const HEADER_RULE = "─";
+const ROW_RULE = "┈";
+
+function Rule({ width, char }: { width: number; char: string }): React.ReactElement {
+  return (
+    <Box paddingX={1}>
+      <Text dimColor>{char.repeat(width)}</Text>
+    </Box>
+  );
 }
 
 export function Table<T>({
@@ -56,6 +102,8 @@ export function Table<T>({
   selectedIndex,
   keyFor,
   emptyMessage,
+  maxRows,
+  rules = false,
 }: TableProps<T>): React.ReactElement {
   if (rows.length === 0) {
     return (
@@ -65,9 +113,19 @@ export function Table<T>({
     );
   }
 
+  // Centred on the selection where the list allows it, so the row being acted on is
+  // always on screen and the rows around it stay stable while the cursor moves.
+  const visible = maxRows && maxRows > 0 ? Math.min(maxRows, rows.length) : rows.length;
+  const start = Math.max(
+    0,
+    Math.min(selectedIndex - Math.floor((visible - 1) / 2), rows.length - visible),
+  );
+  const window = rows.slice(start, start + visible);
+
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
+        <Text>{CURSOR.blank}</Text>
         {columns.map((column) => (
           <Text key={column.header} bold>
             {clip(column.header, column.width)}
@@ -75,20 +133,26 @@ export function Table<T>({
           </Text>
         ))}
       </Box>
-      {rows.map((row, index) => {
+      <Rule width={contentWidth(columns)} char={HEADER_RULE} />
+      {window.map((row, offset) => {
+        const index = start + offset;
         const selected = index === selectedIndex;
         return (
-          <Box key={keyFor(row)} paddingX={1}>
-            <Text inverse={selected}>{selected ? "›" : " "}</Text>
-            {columns.map((column) => {
-              const clipped = clip(column.text(row), column.width);
-              return (
-                <Text key={column.header} inverse={selected}>
-                  {column.render ? column.render(row, clipped) : clipped}
-                  {pad(clipped, column.width)}{" "}
-                </Text>
-              );
-            })}
+          <Box key={keyFor(row)} flexDirection="column">
+            {/* Between rows only. The header already has its own, heavier rule above. */}
+            {rules && offset > 0 ? <Rule width={contentWidth(columns)} char={ROW_RULE} /> : null}
+            <Box paddingX={1}>
+              <Text inverse={selected}>{selected ? CURSOR.marker : CURSOR.blank}</Text>
+              {columns.map((column) => {
+                const clipped = clip(column.text(row), column.width);
+                return (
+                  <Text key={column.header} inverse={selected}>
+                    {column.render ? column.render(row, clipped) : clipped}
+                    {pad(clipped, column.width)}{" "}
+                  </Text>
+                );
+              })}
+            </Box>
           </Box>
         );
       })}
