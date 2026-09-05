@@ -38,5 +38,11 @@ jobs:
           commit: "chore: release"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # npm reads this through the .npmrc setup-node wrote. The changesets action
+          # looks for NPM_TOKEN instead, and without it announces "No NPM_TOKEN found,
+          # but OIDC is available - using npm trusted publishing" — a path that needs a
+          # trusted publisher configured on npmjs.com, which this package does not have.
+          # Both names are set so neither layer has to guess.
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
