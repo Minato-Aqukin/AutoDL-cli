@@ -31,6 +31,15 @@ function pad(value: string, width: number): string {
   return spare > 0 ? " ".repeat(spare) : "";
 }
 
+/**
+ * The cursor cell every data row opens with.
+ *
+ * The header has to reserve it too. It did not, so every value in the table sat exactly
+ * one column to the right of the label naming it — uniformly, which is what made it read
+ * as "the columns are off" rather than as a missing character.
+ */
+const CURSOR = { marker: "›", blank: " " };
+
 /** Cut to `width` columns, counting CJK as two. */
 export function clip(value: string, width: number): string {
   if (stringWidth(value) <= width) return value;
@@ -56,7 +65,19 @@ interface TableProps<T> {
    * and the key hints below it along too.
    */
   maxRows?: number;
+  /**
+   * Draw a rule between rows.
+   *
+   * The caller decides, because each rule costs a row of the list — worth it for the
+   * handful of instances most accounts have, not worth it when the choice is between a
+   * rule and seeing the instance under it.
+   */
+  rules?: boolean;
 }
+
+/** Content columns a row occupies: the cursor cell plus each column and its gutter. */
+export const contentWidth = <T,>(columns: Column<T>[]): number =>
+  1 + columns.reduce((sum, column) => sum + column.width + 1, 0);
 
 export function Table<T>({
   columns,
@@ -65,6 +86,7 @@ export function Table<T>({
   keyFor,
   emptyMessage,
   maxRows,
+  rules = false,
 }: TableProps<T>): React.ReactElement {
   if (rows.length === 0) {
     return (
@@ -86,6 +108,7 @@ export function Table<T>({
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
+        <Text>{CURSOR.blank}</Text>
         {columns.map((column) => (
           <Text key={column.header} bold>
             {clip(column.header, column.width)}
@@ -97,17 +120,26 @@ export function Table<T>({
         const index = start + offset;
         const selected = index === selectedIndex;
         return (
-          <Box key={keyFor(row)} paddingX={1}>
-            <Text inverse={selected}>{selected ? "›" : " "}</Text>
-            {columns.map((column) => {
-              const clipped = clip(column.text(row), column.width);
-              return (
-                <Text key={column.header} inverse={selected}>
-                  {column.render ? column.render(row, clipped) : clipped}
-                  {pad(clipped, column.width)}{" "}
-                </Text>
-              );
-            })}
+          <Box key={keyFor(row)} flexDirection="column">
+            {/* Between rows only, never above the first: a rule under the header would
+                read as a second header instead of as a divider. */}
+            {rules && offset > 0 ? (
+              <Box paddingX={1}>
+                <Text dimColor>{"┈".repeat(contentWidth(columns))}</Text>
+              </Box>
+            ) : null}
+            <Box paddingX={1}>
+              <Text inverse={selected}>{selected ? CURSOR.marker : CURSOR.blank}</Text>
+              {columns.map((column) => {
+                const clipped = clip(column.text(row), column.width);
+                return (
+                  <Text key={column.header} inverse={selected}>
+                    {column.render ? column.render(row, clipped) : clipped}
+                    {pad(clipped, column.width)}{" "}
+                  </Text>
+                );
+              })}
+            </Box>
           </Box>
         );
       })}

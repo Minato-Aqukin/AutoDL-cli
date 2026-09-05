@@ -184,6 +184,91 @@ describe("the billing panel", () => {
   });
 });
 
+describe("every value sits under the label that names it", () => {
+  /** Display column where `token` starts, counting CJK as two. */
+  const columnOf = (line: string, token: string): number => {
+    const index = line.indexOf(token);
+    return index < 0 ? -1 : stringWidth(line.slice(0, index));
+  };
+
+  const stopped = makeRow("ddp-deploy", {
+    instance: { ...makeRow("ddp-deploy").instance, status: "shutdown" },
+    uptimeSeconds: null,
+    priceYuanPerHour: null,
+    estimatedCostYuan: null,
+    ttlRemainingMs: -1000,
+  });
+
+  it("lines the header up with the cells beneath it", () => {
+    // The header row had no cursor cell while every data row did, so the whole table sat
+    // one column right of its own labels — uniformly, which reads as "the columns are
+    // off" rather than as a missing character.
+    const frame = frameOf({ rows: [stopped], withSnapshot: false });
+    const lines = frame.split("\n");
+    const header = lines.find((line) => line.includes("已开机")) ?? "";
+    const data = lines.find((line) => line.includes("ddp-deploy")) ?? "";
+
+    for (const [label, value] of [
+      ["实例", "ddp-deploy"],
+      ["状态", "shutdown"],
+      ["GPU", "4090D"],
+      ["地区", "北京B区"],
+      ["TTL", "已超时"],
+    ] as [string, string][]) {
+      expect(columnOf(data, value), `${label} column`).toBe(columnOf(header, label));
+    }
+  });
+
+  it("holds the alignment at a width that drops columns", () => {
+    const frame = frameOf({ rows: [stopped], withSnapshot: false, width: 78 });
+    const lines = frame.split("\n");
+    const header = lines.find((line) => line.includes("已开机")) ?? "";
+    const data = lines.find((line) => line.includes("ddp-deploy")) ?? "";
+
+    expect(columnOf(data, "shutdown")).toBe(columnOf(header, "状态"));
+    expect(columnOf(data, "已超时")).toBe(columnOf(header, "TTL"));
+  });
+
+  it("holds the alignment for the selected row, which carries the cursor", () => {
+    const frame = frameOf({ rows: [makeRow("first"), stopped], selectedIndex: 1 });
+    const lines = frame.split("\n");
+    const header = lines.find((line) => line.includes("已开机")) ?? "";
+    const data = lines.find((line) => line.includes("ddp-deploy")) ?? "";
+
+    expect(data).toContain("›");
+    expect(columnOf(data, "shutdown")).toBe(columnOf(header, "状态"));
+  });
+});
+
+describe("rules between instances", () => {
+  const RULE = "┈";
+
+  it("separates one instance from the next", () => {
+    const frame = frameOf({ rows: [makeRow("a"), makeRow("b")] });
+    expect(frame).toContain(RULE);
+
+    // Between rows, never above the first — a rule under the header would read as a
+    // second header rather than as a divider.
+    const lines = frame.split("\n");
+    const first = lines.findIndex((line) => line.includes("  a "));
+    const rule = lines.findIndex((line) => line.includes(RULE));
+    expect(rule).toBeGreaterThan(first);
+  });
+
+  it("draws none for a single instance, which has nothing to be separated from", () => {
+    expect(frameOf({ rows: [makeRow("only")] })).not.toContain(RULE);
+  });
+
+  it("gives them up rather than hide an instance behind one", () => {
+    // Nine instances and rules between them is seventeen lines; the panel has fewer.
+    const many = Array.from({ length: 9 }, (_, index) => makeRow(`inst-${index}`));
+    const frame = frameOf({ rows: many, height: 30 });
+    expect(frame).not.toContain(RULE);
+    const shown = frame.split("\n").filter((line) => line.includes("running")).length;
+    expect(shown).toBe(9);
+  });
+});
+
 describe("the layout gives way on a small terminal", () => {
   const rows = [makeRow("a"), makeRow("b"), makeRow("c"), makeRow("d")];
 

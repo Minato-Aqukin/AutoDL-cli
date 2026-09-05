@@ -310,10 +310,15 @@ export function Dashboard({
     (entry) => entry.instance.status === "running" && entry.estimatedCostYuan === null,
   );
 
-  const maxRows = Math.max(
+  const rowBudget = Math.max(
     1,
     height - headerRows(width) - STATUS_ROWS - metricRows - PANEL_CHROME - (estimateNote ? 1 : 0),
   );
+  // A rule between each pair of rows costs a line per gap, so it is drawn only while
+  // every instance still fits with them. The moment a rule would push an instance off
+  // the panel, the instances win — a divider is worth less than the row it hides.
+  const rules = rows.length > 1 && rows.length * 2 - 1 <= rowBudget;
+  const maxRows = rules ? rows.length : rowBudget;
 
   // Label, bar, reading and the trailing size or sparkline all have to fit one panel's
   // inner width; the bar is what gives when they do not. One column is held back, since
@@ -341,6 +346,7 @@ export function Dashboard({
           keyFor={(entry) => entry.instance.uuid}
           emptyMessage={loading ? "正在加载实例…" : "当前账号下没有实例。按 n 新建一台。"}
           maxRows={maxRows}
+          rules={rules}
         />
         {estimateNote ? (
           <Box paddingX={1}>
