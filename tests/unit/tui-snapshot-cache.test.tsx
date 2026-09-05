@@ -82,7 +82,30 @@ const { App } = await import("../../src/tui/app.js");
 
 const plain = (s: string | undefined) =>
   (s ?? "").replace(new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g"), "");
-const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Wait for the screen to say something, not for a fixed number of milliseconds.
+ *
+ * Every wait in this file sits on a chain of real promises — a mocked endpoint resolves,
+ * React re-renders, an effect fires the next fetch. A sleep long enough on a developer's
+ * machine is a coin flip on a loaded CI runner, and a fixed 80ms here failed a release.
+ */
+async function until(check: () => boolean, what: string, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(`timed out waiting for ${what}`);
+}
+
+/** Wait for `text` to appear on screen. */
+const untilFrame = (frame: () => string | undefined, text: string): Promise<void> =>
+  until(() => plain(frame()).includes(text), `“${text}” on screen`);
+
+/** Wait for the clipboard to be written to at all; the caller asserts what landed. */
+const untilCopied = (): Promise<void> =>
+  until(() => copied.mock.calls.length > 0, "a clipboard write");
 const TOKEN = [
   "header",
   Buffer.from(JSON.stringify({ uid: 785976 })).toString("base64url"),
@@ -105,23 +128,22 @@ describe("the resource panel is a live view", () => {
     // The panel used to be fed a snapshot fetched once and cached forever, which meant a
     // CPU bar frozen at whatever the instance happened to be doing when it was opened.
     const { stdin, lastFrame } = mount();
-    await wait(80);
-    expect(plain(lastFrame())).toContain("12.0%");
+    await untilFrame(lastFrame, "12.0%");
 
     state.cpu = 87;
     stdin.write("r");
-    await wait(120);
-    const out = plain(lastFrame());
-    expect(out).toContain("87.0%");
-    expect(out).not.toContain("12.0%");
+    await untilFrame(lastFrame, "87.0%");
+
+    // Replaced, not appended: the old reading is gone from the panel.
+    expect(plain(lastFrame())).not.toContain("12.0%");
   });
 
   it("accumulates the readings into a history the sparkline can draw", async () => {
     const { stdin, lastFrame } = mount();
-    await wait(80);
+    await untilFrame(lastFrame, "12.0%");
     state.cpu = 87;
     stdin.write("r");
-    await wait(120);
+    await untilFrame(lastFrame, "87.0%");
 
     // Two samples so far: a low one and a high one, in that order.
     expect(plain(lastFrame())).toMatch(/[▁▂][▇█]/);
@@ -129,53 +151,55 @@ describe("the resource panel is a live view", () => {
 });
 
 describe("SSH details across a power cycle", () => {
+  /** Move the instance to its second boot, with readings that say the swap has landed. */
+  const powerCycle = () => {
+    state.startedAt = BOOT_TWO;
+    state.port = 51999;
+    state.password = "second-password";
+    state.cpu = 87;
+  };
+
   it("copies the current boot's command", async () => {
-    const { stdin } = mount();
-    await wait(80);
+    const { stdin, lastFrame } = mount();
+    await untilFrame(lastFrame, "12.0%");
     stdin.write("c");
-    await wait(60);
+    await untilCopied();
     expect(copied).toHaveBeenCalledWith("ssh -p 34222 root@connect.xxx.autodl.com");
   });
 
   it("copies the new port after the instance is power-cycled", async () => {
-    const { stdin } = mount();
-    await wait(80);
+    const { stdin, lastFrame } = mount();
+    await untilFrame(lastFrame, "12.0%");
     stdin.write("c");
-    await wait(60);
+    await untilCopied();
     expect(copied).toHaveBeenCalledWith("ssh -p 34222 root@connect.xxx.autodl.com");
 
     // Stopped and started again: AutoDL hands out a fresh port and password.
-    state.startedAt = BOOT_TWO;
-    state.port = 51999;
-    state.password = "second-password";
+    powerCycle();
     copied.mockReset();
     stdin.write("r");
-    await wait(120);
+    await untilFrame(lastFrame, "87.0%");
 
     stdin.write("c");
-    await wait(60);
+    await untilCopied();
     expect(copied).toHaveBeenCalledWith("ssh -p 51999 root@connect.xxx.autodl.com");
     expect(copied).not.toHaveBeenCalledWith("ssh -p 34222 root@connect.xxx.autodl.com");
   });
 
   it("shows the new password on the detail screen, not the one from the last boot", async () => {
     const { stdin, lastFrame } = mount();
-    await wait(80);
+    await untilFrame(lastFrame, "12.0%");
 
-    state.startedAt = BOOT_TWO;
-    state.port = 51999;
-    state.password = "second-password";
+    powerCycle();
     stdin.write("r");
-    await wait(120);
+    await untilFrame(lastFrame, "87.0%");
 
     // Enter opens the detail screen, p reveals the password.
     stdin.write("\r");
-    await wait(40);
+    await untilFrame(lastFrame, "实例详情");
     stdin.write("p");
-    await wait(40);
+    await untilFrame(lastFrame, "second-password");
 
-    const out = plain(lastFrame());
-    expect(out).toContain("second-password");
-    expect(out).not.toContain("first-password");
+    expect(plain(lastFrame())).not.toContain("first-password");
   });
 });
