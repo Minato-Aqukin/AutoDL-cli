@@ -61,6 +61,10 @@ it says so when `AUTODL_TOKEN` or `--token` will outrank whatever you save next.
 API rejects the token while the dashboard is open — expired, reset, verification lapsed —
 polling stops and the same login screen is one keystroke away, rather than leaving a
 frozen table above an endless stream of 401s.
+Re-login keeps the same token precedence: `--token` › `AUTODL_TOKEN` › saved token.
+Saving a different token does not switch accounts while an override is active. If that
+override is invalid, remove or update it and restart the TUI; it will not silently fall
+back to the saved account. Authentication failures from GPU stock queries also end the session.
 
 It fills the terminal and shows your account id and balance in the header. Copying with
 `c` puts only the SSH command on the clipboard — never the root password, which any
@@ -78,6 +82,10 @@ Two deliberate honesty constraints. A rate is only knowable from a **running** i
 snapshot, so a stopped instance shows elapsed time and no money — inventing a number
 would be worse than showing none. And while a rate is still loading the total says so
 rather than quietly under-reporting.
+Account runway stays pending until every running instance's rate is known; an unknown
+rate is never treated as free compute. On short terminals, including 80×24, the resource
+and billing panels are hidden when their stacked layout would obscure the instance list
+or keyboard hints.
 
 The TUI never runs in a pipe, in CI, or under `--json`: it exits with code 2 and an
 explanation instead of taking over a terminal that isn't there. A bare `autodl` outside
@@ -258,6 +266,9 @@ Stable across minor versions. Breaking changes require a major.
 
 **stdout in `--json` mode is pure JSON.** Progress, prompts and warnings all go to
 stderr, so `autodl ... --json | jq` is always safe.
+Unknown commands, unknown options and missing arguments use exit code 2 with a `USAGE`
+error, including a JSON error object when `--json` is enabled. `tui --json` follows the
+same error contract; explicit help and version requests still print their normal text.
 
 ```jsonc
 // success

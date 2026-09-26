@@ -240,9 +240,8 @@ export function useInstances(
   useEffect(() => {
     // A dead token makes every further request a guaranteed 401; polling on would only
     // spam the API behind whatever the caller shows the user.
-    if (authError) return;
+    if (authError || paused) return;
     void load();
-    if (paused) return;
     const timer = setInterval(() => void load(), intervalMs);
     return () => clearInterval(timer);
   }, [load, intervalMs, paused, authError]);

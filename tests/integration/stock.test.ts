@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { resolveGpuSpec } from "../../src/core/catalog.js";
 import { AutoDLClient } from "../../src/core/client.js";
 import { getRegionGpuStock } from "../../src/core/endpoints/machine.js";
-import { UsageError } from "../../src/core/errors.js";
-import { chooseRegions, findRegionsWithStock } from "../../src/core/stock.js";
+import { AuthError, UsageError } from "../../src/core/errors.js";
+import { chooseRegions, findRegionsWithStock, getStockByRegion } from "../../src/core/stock.js";
 import { configureOutput } from "../../src/output/format.js";
 import { mockFetch } from "../fixtures/mock-fetch.js";
 import { stockResponse } from "../fixtures/responses.js";
@@ -122,6 +122,30 @@ describe("findRegionsWithStock", () => {
     });
     expect(ranked.map((r) => r.regionId)).toEqual(["westDC3"]);
     expect(failures).toHaveLength(1);
+  });
+
+  it("lets an expired token fail the whole lookup instead of reporting partial stock", async () => {
+    // Auth is session-scoped: every region 401s the same way, and per-region strings
+    // would hide the dead session from callers that only consume snapshots.
+    const fetchMock = mockFetch([{ path: STOCK, status: 401, response: {} }]);
+    await expect(
+      getStockByRegion(client(fetchMock.impl), { regions: ["westDC3", "beijingDC2"] }),
+    ).rejects.toThrow(AuthError);
+  });
+
+  it("propagates an envelope-mapped auth failure even when one region succeeds", async () => {
+    const mixed = mockFetch([
+      {
+        path: STOCK,
+        response: (_call, index) =>
+          index === 0
+            ? stockResponse({ "RTX PRO 6000": { idle: 5, total: 10 } })
+            : { code: "AuthFailed", msg: "token invalid", request_id: "req-auth" },
+      },
+    ]);
+    await expect(
+      getStockByRegion(client(mixed.impl), { regions: ["westDC3", "beijingDC2"] }),
+    ).rejects.toThrow(AuthError);
   });
 });
 

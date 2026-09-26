@@ -89,6 +89,15 @@ export function bareAction<Args extends unknown[]>(
     const command = args[args.length - 1] as Command;
     const globals = globalsOf(command);
     try {
+      // Output and language must be configured even though no client is built,
+      // otherwise --json failures fall back to human text on stderr.
+      configureOutput({
+        json: globals.json ?? false,
+        color: globals.color ?? true,
+        verbose: globals.verbose ?? false,
+      });
+      setLang(resolveLang(globals.lang));
+
       const code = await handler(globals, ...args);
       process.exitCode = typeof code === "number" ? code : ExitCode.OK;
     } catch (err) {

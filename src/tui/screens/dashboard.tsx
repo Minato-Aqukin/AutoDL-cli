@@ -3,7 +3,7 @@ import type React from "react";
 import { formatDuration } from "../../core/duration.js";
 import { formatRate, formatYuan } from "../../core/money.js";
 import type { Balance, InstanceSnapshot } from "../../core/schemas.js";
-import { formatBytes } from "../../output/format.js";
+import { formatBytes, stringWidth } from "../../output/format.js";
 import { headerRows } from "../components/header.js";
 import { Gauge, LABEL_WIDTH, READING_WIDTH, Sparkline } from "../components/meters.js";
 import { Panel } from "../components/panel.js";
@@ -138,10 +138,11 @@ const PANEL_PADDING = 4;
 const SPARK_GAP = 2;
 /** Widest instance name a panel's border will carry. */
 const NOTE_WIDTH = 24;
-/** Below this there is no room for panels *and* a usable list; the list wins. */
-const MIN_HEIGHT_FOR_METRICS = 22;
 /** Below this the two panels cannot sit side by side without squeezing the bars out. */
 const MIN_WIDTH_FOR_COLUMNS = 88;
+/** Shown under the list while any running instance's rate is still unknown. */
+const ESTIMATE_NOTE_TEXT =
+  "费用为估算值：AutoDL 按秒计费且有 ¥0.01 下限，单价需选中运行中的实例后才会拉取。";
 
 const percentOf = (used: number | null, total: number | null): number | null =>
   used === null || total === null || total <= 0 ? null : (used / total) * 100;
@@ -151,8 +152,19 @@ const sizeOf = (used: number | null, total: number | null): string | undefined =
     ? undefined
     : `${formatBytes(used)} / ${formatBytes(total)}`;
 
-/** How long the balance lasts at the fleet's current burn rate. */
-function runwayText(balance: Balance | null, ratePerHour: number): string {
+/**
+ * How long the balance lasts at the fleet's current burn rate.
+ *
+ * A running instance whose rate is still unknown makes the fleet total a lower bound,
+ * never a figure to divide the balance by — the same honesty rule as the status bar's
+ * partial total, which would rather say the sum is low than print a confident number.
+ */
+function runwayText(balance: Balance | null, ratePerHour: number, partial: boolean): string {
+  if (partial) {
+    if (balance && balance.balanceYuan <= 0) return "余额已耗尽";
+    if (ratePerHour <= 0) return "单价获取中…";
+    return "部分实例单价未取到，续航待定";
+  }
   if (ratePerHour <= 0) return "当前不产生费用";
   if (!balance) return "余额加载中…";
   if (balance.balanceYuan <= 0) return "余额已耗尽";
@@ -229,6 +241,10 @@ function Billing({
 }): React.ReactElement {
   const running = rows.filter((entry) => entry.instance.status === "running");
   const fleetRate = running.reduce((sum, entry) => sum + (entry.priceYuanPerHour ?? 0), 0);
+  // Rates arrive with each running instance's snapshot, so one missing leg makes the
+  // fleet total a lower bound. Stopped instances carry no rate by design and stay out
+  // of this judgement entirely.
+  const partial = running.some((entry) => entry.priceYuanPerHour === null);
 
   const own = !row
     ? "—"
@@ -273,7 +289,7 @@ function Billing({
       </Box>
       <Box>
         <Text dimColor>{"续航  "}</Text>
-        <Text>{runwayText(balance, fleetRate)}</Text>
+        <Text>{runwayText(balance, fleetRate, partial)}</Text>
       </Box>
     </>
   );
@@ -303,17 +319,37 @@ export function Dashboard({
   height = 30,
 }: DashboardProps): React.ReactElement {
   const row = rows[selectedIndex];
-  const showMetrics = height >= MIN_HEIGHT_FOR_METRICS;
   const sideBySide = width >= MIN_WIDTH_FOR_COLUMNS;
-  const metricRows = showMetrics ? (sideBySide ? METRIC_ROWS : METRIC_ROWS * 2) : 0;
+  // Stacked panels cost twice the rows: two bordered panels of four content rows each.
+  const metricRows = sideBySide ? METRIC_ROWS : METRIC_ROWS * 2;
 
   const estimateNote = rows.some(
     (entry) => entry.instance.status === "running" && entry.estimatedCostYuan === null,
   );
+  // The note wraps like any other text — at 80 columns it already needs two rows, and
+  // budgeting one unconditionally is how the billing panel ended up under the status
+  // bar on an 80x24 terminal.
+  const estimateNoteLines = estimateNote
+    ? Math.max(
+        1,
+        Math.ceil(stringWidth(ESTIMATE_NOTE_TEXT) / Math.max(1, width - PANEL_PADDING - 2)),
+      )
+    : 0;
+
+  // Panels show only when the header, the status bar, one row of the list and the
+  // panels themselves all fit — measured from the real budget, not from a fixed
+  // height that cannot know whether the panels are stacked.
+  const showMetrics =
+    headerRows(width) + STATUS_ROWS + PANEL_CHROME + 1 + estimateNoteLines + metricRows <= height;
 
   const rowBudget = Math.max(
     1,
-    height - headerRows(width) - STATUS_ROWS - metricRows - PANEL_CHROME - (estimateNote ? 1 : 0),
+    height -
+      headerRows(width) -
+      STATUS_ROWS -
+      (showMetrics ? metricRows : 0) -
+      PANEL_CHROME -
+      estimateNoteLines,
   );
   // A rule between each pair of rows costs a line per gap, so it is drawn only while
   // every instance still fits with them. The moment a rule would push an instance off
@@ -351,15 +387,18 @@ export function Dashboard({
         />
         {estimateNote ? (
           <Box paddingX={1}>
-            <Text dimColor>
-              费用为估算值：AutoDL 按秒计费且有 ¥0.01 下限，单价需选中运行中的实例后才会拉取。
-            </Text>
+            <Text dimColor>{ESTIMATE_NOTE_TEXT}</Text>
           </Box>
         ) : null}
       </Panel>
 
       {showMetrics ? (
-        <Box flexDirection={sideBySide ? "row" : "column"} gap={sideBySide ? 1 : 0}>
+        <Box
+          flexDirection={sideBySide ? "row" : "column"}
+          gap={sideBySide ? 1 : 0}
+          height={metricRows}
+          flexShrink={0}
+        >
           <Panel
             title="资源"
             // Clipped: the title sits in the border, so an instance named at length would

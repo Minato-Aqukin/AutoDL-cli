@@ -163,6 +163,72 @@ describe("exit codes", () => {
     expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
   });
 
+  it("returns 2 with a JSON envelope for an unknown command under --json", async () => {
+    const result = await runCli(["--json", "definitely-invalid-command"]);
+    expect(result.code).toBe(2);
+    expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
+    expect(result.stderr).not.toContain("error:");
+  });
+
+  it("returns 2 with a JSON envelope when --json follows the unknown command", async () => {
+    const result = await runCli(["definitely-invalid-command", "--json"]);
+    expect(result.code).toBe(2);
+    expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
+    expect(result.stderr).not.toContain("error:");
+  });
+
+  it("keeps the help hint for an unknown command in human mode", async () => {
+    const result = await runCli(["definitely-invalid-command"]);
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("--help");
+  });
+
+  it("returns 2 with a JSON envelope for a missing required option under --json", async () => {
+    const result = await runCli(["create", "--json"]);
+    expect(result.code).toBe(2);
+    expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
+    expect(result.stderr).not.toContain("error:");
+  });
+
+  it("returns 2 with a JSON envelope for a missing positional argument under --json", async () => {
+    const result = await runCli(["info", "--json"]);
+    expect(result.code).toBe(2);
+    expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
+    expect(result.stderr).not.toContain("error:");
+  });
+
+  it("returns 2 with a JSON envelope for an unknown option under --json", async () => {
+    const result = await runCli(["ls", "--definitely-unknown-option", "--json"]);
+    expect(result.code).toBe(2);
+    expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
+    expect(result.stderr).not.toContain("error:");
+  });
+
+  it("does not mistake a --token value of --json for the global flag", async () => {
+    const result = await runCli(["--token", "--json", "definitely-invalid-command"], {
+      AUTODL_TOKEN: "",
+    });
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.json).toBeUndefined();
+  });
+
+  it("does not treat --json after -- as the global flag", async () => {
+    // Everything past -- is positional, so --json must not trigger the JSON
+    // envelope here; create still fails, but on the missing --gpu at parse time.
+    const result = await runCli(["create", "--", "--json"]);
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.json).toBeUndefined();
+  });
+
+  it("keeps --help on stdout with exit 0 even when --json is passed", async () => {
+    const result = await runCli(["--help", "--json"]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("autodl mcp");
+  });
+
   it("returns 3 when no token is configured", async () => {
     const result = await runCli(["account", "--json"], { AUTODL_TOKEN: "" });
     expect(result.code).toBe(3);
@@ -315,10 +381,11 @@ describe("the TUI never hijacks a non-interactive session", () => {
   // The whole agent contract rests on this: stdout stays parseable and nothing takes
   // over the terminal. Failing loudly beats degrading silently, because a script that
   // reaches here has a bug worth seeing.
-  it("refuses `tui` under --json with exit 2", async () => {
+  it("refuses `tui` under --json with exit 2 and a JSON envelope", async () => {
     const result = await runCli(["tui", "--json"]);
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain("--json");
+    expect(result.json).toMatchObject({ ok: false, error: { code: "USAGE" } });
+    expect(result.stderr).not.toContain("error:");
   });
 
   it("refuses `tui` when stdout is not a terminal", async () => {

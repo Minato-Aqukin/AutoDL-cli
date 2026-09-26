@@ -5,6 +5,7 @@ import {
   clearToken,
   configPath,
   resolveBaseUrl,
+  resolveToken,
   type TokenResolution,
   tryResolveToken,
   updateConfig,
@@ -526,23 +527,34 @@ export function Root({ globals }: { globals: TuiGlobals }): React.ReactElement {
   const [verifying, setVerifying] = useState(false);
 
   const submit = useCallback(
-    (token: string) => {
+    async (token: string) => {
       setVerifying(true);
       setError(null);
-      const baseUrl = resolveBaseUrl(globals.baseUrl);
-      const candidate = new AutoDLClient({ token, ...(baseUrl ? { baseUrl } : {}) });
-      // Verify before persisting — writing a dead token just moves the failure later,
-      // exactly as `autodl login` does.
-      getBalance(candidate)
-        .then(() => {
-          updateConfig({ token });
-          setNotice(null);
-          setSession({ client: candidate, token, source: "config" });
-        })
-        .catch((err: Error) => setError(err.message))
-        .finally(() => setVerifying(false));
+      try {
+        const baseUrl = resolveBaseUrl(globals.baseUrl);
+        const candidate = new AutoDLClient({ token, ...(baseUrl ? { baseUrl } : {}) });
+        // Verify the input before saving, then respect flag > env > saved config.
+        await getBalance(candidate);
+        updateConfig({ token });
+        const resolved = resolveToken(globals.token);
+        const client =
+          resolved.token === token
+            ? candidate
+            : new AutoDLClient({
+                token: resolved.token,
+                ...(baseUrl ? { baseUrl } : {}),
+              });
+        // An expired override must not silently switch to the saved token's account.
+        if (client !== candidate) await getBalance(client);
+        setNotice(null);
+        setSession({ client, token: resolved.token, source: resolved.source });
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setVerifying(false);
+      }
     },
-    [globals.baseUrl],
+    [globals.baseUrl, globals.token],
   );
 
   const logout = useCallback(

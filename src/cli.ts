@@ -10,8 +10,9 @@ import { registerRunCommand } from "./commands/run.js";
 import { registerSSHCommands } from "./commands/ssh.js";
 import { registerStockCommand } from "./commands/stock.js";
 import { registerTuiCommand } from "./commands/tui.js";
-import { ExitCode, toAutoDLError } from "./core/errors.js";
-import { emitError } from "./output/format.js";
+import type { GlobalOptions } from "./context.js";
+import { ExitCode, toAutoDLError, UsageError } from "./core/errors.js";
+import { configureOutput, emitError } from "./output/format.js";
 import { VERSION } from "./version.js";
 
 export function buildProgram(): Command {
@@ -102,16 +103,57 @@ export async function main(argv: string[] = process.argv): Promise<void> {
   }
 
   const program = buildProgram();
+  // Buffer commander's parse-phase diagnostics instead of letting them reach stderr
+  // immediately, so --json can replace them with the single stdout envelope.
+  // Human output is replayed verbatim below, so non-JSON behaviour is unchanged.
+  const parseDiagnostics: string[] = [];
+  const bufferDiagnostic = (message: string): void => {
+    parseDiagnostics.push(message);
+  };
+  const installParseHandling = (command: Command): void => {
+    // Subcommands snapshot the output config and exit callback at creation time,
+    // so every level needs the same treatment as the root.
+    command.configureOutput({ outputError: bufferDiagnostic, writeErr: bufferDiagnostic });
+    // Turn commander's process.exit() into a catchable error so parse failures get
+    // the documented exit codes and output routing instead of exit 1 + stderr text.
+    command.exitOverride();
+    for (const subcommand of command.commands) installParseHandling(subcommand);
+  };
+  installParseHandling(program);
   try {
     await program.parseAsync(argv);
   } catch (err) {
-    // Commander throws for --help / --version; those already printed their output.
-    const asCommanderError = err as { code?: string; exitCode?: number };
-    if (
-      typeof asCommanderError?.code === "string" &&
-      asCommanderError.code.startsWith("commander.")
-    ) {
-      process.exitCode = asCommanderError.exitCode ?? ExitCode.OK;
+    const commanderError = err as { code?: string; exitCode?: number; message?: string };
+    if (typeof commanderError?.code === "string" && commanderError.code.startsWith("commander.")) {
+      // --help / --version already printed to stdout; keep exit 0.
+      if (
+        commanderError.code === "commander.helpDisplayed" ||
+        commanderError.code === "commander.version"
+      ) {
+        process.exitCode = commanderError.exitCode ?? ExitCode.OK;
+        return;
+      }
+      // program.opts() reflects commander's own parsing, so a --json that is an
+      // option value (--token --json) or past -- is not mistaken for the flag.
+      const jsonRequested = program.opts<GlobalOptions>().json === true;
+      if (jsonRequested) {
+        configureOutput({ json: true });
+        emitError(
+          new UsageError(
+            commanderError.code === "commander.help"
+              ? "未指定子命令"
+              : (commanderError.message ?? "").replace(/^error:\s*/, ""),
+            { hint: "运行 `autodl --help` 查看用法" },
+          ),
+        );
+        process.exitCode = ExitCode.USAGE;
+        return;
+      }
+      if (parseDiagnostics.length > 0) process.stderr.write(parseDiagnostics.join(""));
+      process.exitCode =
+        commanderError.code === "commander.help"
+          ? (commanderError.exitCode ?? ExitCode.GENERIC)
+          : ExitCode.USAGE;
       return;
     }
     const error = toAutoDLError(err);

@@ -62,8 +62,15 @@ function frameOf(options: {
   height?: number;
   withSnapshot?: boolean;
   withBalance?: boolean;
+  balanceYuan?: number;
 }): string {
   const width = options.width ?? 100;
+  const resolvedBalance =
+    options.balanceYuan !== undefined
+      ? { balanceYuan: options.balanceYuan, accumulatedYuan: 0, voucherYuan: 0 }
+      : options.withBalance === false
+        ? null
+        : balance;
   return plain(
     render(
       <Box width={width}>
@@ -73,7 +80,7 @@ function frameOf(options: {
           loading={false}
           snapshot={options.withSnapshot === false ? undefined : snapshot}
           history={options.withSnapshot === false ? undefined : history}
-          balance={options.withBalance === false ? null : balance}
+          balance={resolvedBalance}
           width={width}
           height={options.height ?? 34}
         />
@@ -181,6 +188,44 @@ describe("the billing panel", () => {
   it("flags an instance with no TTL, which is the one that runs all night", () => {
     const out = frameOf({ rows: [makeRow("box", { ttlRemainingMs: null })] });
     expect(out).toContain("不会自动关机");
+  });
+
+  it("does not invent a runway when one running rate is still unknown", () => {
+    // Rate [2, null] with ¥20 of balance would read as "10h" if the unknown leg were
+    // counted as zero. The honest answer is that the total is a lower bound.
+    const rows = [
+      makeRow("a", { priceYuanPerHour: 2, estimatedCostYuan: 2 }),
+      makeRow("b", { priceYuanPerHour: null, estimatedCostYuan: null }),
+    ];
+    const out = frameOf({ rows, balanceYuan: 20 });
+    expect(out).toContain("续航");
+    expect(out).not.toContain("10h");
+    expect(out).toContain("部分");
+  });
+
+  it("says plainly when no running rate is known yet", () => {
+    const rows = [
+      makeRow("a", { priceYuanPerHour: null, estimatedCostYuan: null }),
+      makeRow("b", { priceYuanPerHour: null, estimatedCostYuan: null }),
+    ];
+    const out = frameOf({ rows, balanceYuan: 20 });
+    expect(out).not.toContain("当前不产生费用");
+    expect(out).toContain("单价获取中");
+  });
+
+  it("ignores stopped instances when judging whether the rate is complete", () => {
+    const rows = [
+      makeRow("a", { priceYuanPerHour: 2, estimatedCostYuan: 2 }),
+      makeRow("idle", {
+        instance: { ...makeRow("idle").instance, status: "shutdown" },
+        uptimeSeconds: null,
+        priceYuanPerHour: null,
+        estimatedCostYuan: null,
+      }),
+    ];
+    const out = frameOf({ rows, balanceYuan: 20 });
+    expect(out).toContain("10h");
+    expect(out).not.toContain("部分");
   });
 });
 
@@ -327,5 +372,42 @@ describe("the layout gives way on a small terminal", () => {
     expect(out).toContain("inst-30");
     // And the frame is still the height it was given, not forty rows tall.
     expect(out.split("\n").length).toBeLessThanOrEqual(34);
+  });
+
+  it("drops stacked panels on an 80x24 terminal so the list stays usable", () => {
+    // 80 columns force the two panels into one column (about 12 rows); 24 rows cannot
+    // hold the header, a one-row list and both panels, so the panels give way.
+    const out = frameOf({ rows: [makeRow("box"), makeRow("idle")], width: 80, height: 24 });
+    expect(out).not.toContain("资源");
+    expect(out).not.toContain("续航");
+    expect(out).toContain("›box");
+    expect(out.split("\n").length).toBeLessThanOrEqual(24);
+  });
+
+  it("stacks the panels on a narrow but tall terminal", () => {
+    // Narrow costs height (the panels stack to ~12 rows) but 40 rows still fit header,
+    // list and both panels with a row of the list visible.
+    const out = frameOf({ rows: [makeRow("box")], width: 80, height: 40 });
+    expect(out).toContain("资源");
+    expect(out).toContain("续航");
+    expect(out).toContain("›box");
+    expect(out.split("\n").length).toBeLessThanOrEqual(40);
+  });
+
+  it("keeps the panels on a wide but short terminal", () => {
+    // Wide keeps the panels side by side (~6 rows), so 24 rows still fit panels plus a
+    // one-row list; only genuinely short terminals drop them.
+    const out = frameOf({ rows: [makeRow("box")], width: 100, height: 24 });
+    expect(out).toContain("资源");
+    expect(out).toContain("续航");
+    expect(out).toContain("›box");
+    expect(out.split("\n").length).toBeLessThanOrEqual(24);
+  });
+
+  it("always keeps one row of the list visible when it drops the panels", () => {
+    const many = Array.from({ length: 40 }, (_, index) => makeRow(`inst-${index}`));
+    const out = frameOf({ rows: many, width: 80, height: 24 });
+    expect(out).not.toContain("资源");
+    expect(out).toContain("inst-0");
   });
 });

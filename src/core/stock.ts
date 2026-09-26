@@ -8,6 +8,7 @@ import {
 } from "./catalog.js";
 import type { AutoDLClient } from "./client.js";
 import { type GpuStockEntry, getRegionGpuStock } from "./endpoints/machine.js";
+import { isAuthError } from "./errors.js";
 
 /**
  * Turn raw per-region stock into a ranked list of places to try.
@@ -52,6 +53,15 @@ export async function getStockByRegion(
 
   const snapshots: StockSnapshot[] = [];
   const failures: { regionId: string; reason: string }[] = [];
+
+  // Auth is session-scoped, not region-scoped: every region fails the same way, so
+  // surfacing it as per-region strings would hide the expired session from callers
+  // that only read snapshots (the TUI's loadStock) and from the shared noteAuthFailure
+  // path. Re-throw the first one; ordinary region faults stay partial below.
+  const authFailure = settled.find(
+    (result) => result.status === "rejected" && isAuthError(result.reason),
+  );
+  if (authFailure?.status === "rejected") throw authFailure.reason;
 
   settled.forEach((result, index) => {
     const region = targets[index];
