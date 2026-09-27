@@ -96,7 +96,7 @@ export {
 export { buildServer, startMcpServer } from "./mcp/server.js";
 export { connectInteractive, formatSSHCommand } from "./ssh/connect.js";
 export type { SSHCredentials } from "./ssh/credentials.js";
-export { getCredentials, withSSH } from "./ssh/credentials.js";
+export { connectSSH, getCredentials, withSSH } from "./ssh/credentials.js";
 export type { ExecOptions, ExecResult } from "./ssh/exec.js";
 export { execCommand, execOnConnection } from "./ssh/exec.js";
 export type { TransferOptions, TransferSummary } from "./ssh/transfer.js";

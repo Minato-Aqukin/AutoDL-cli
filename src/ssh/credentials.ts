@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import { Client } from "ssh2";
 import type { AutoDLClient } from "../core/client.js";
 import {
@@ -42,7 +43,9 @@ export async function getCredentials(
   uuid: string,
   options: CredentialOptions = {},
 ): Promise<SSHCredentials> {
+  assertNotAborted(options.signal);
   let status = await getInstanceStatus(client, uuid);
+  assertNotAborted(options.signal);
 
   if (status !== "running") {
     if (!options.autoStart) {
@@ -63,6 +66,7 @@ export async function getCredentials(
     }
 
     if (status === "shutdown") {
+      assertNotAborted(options.signal);
       note(t("instance.poweringOn"));
       await powerOnInstance(client, uuid);
     }
@@ -75,6 +79,7 @@ export async function getCredentials(
   }
 
   const snapshot = await getInstanceSnapshot(client, uuid);
+  assertNotAborted(options.signal);
   const { host, port, password } = snapshot.ssh;
 
   if (!host || !port || !password) {
@@ -103,24 +108,45 @@ export interface ConnectOptions extends CredentialOptions {
  */
 const RETRY_DELAYS_MS = [2_000, 5_000, 8_000];
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function connectOnce(creds: SSHCredentials, options: ConnectOptions): Promise<Client> {
-  return new Promise((resolve, reject) => {
-    const conn = new Client();
-    const settle = (err?: Error) => {
-      conn.removeAllListeners("ready");
-      conn.removeAllListeners("error");
-      if (err) reject(err);
-      else resolve(conn);
-    };
-    conn.once("ready", () => settle());
-    conn.once("error", (err) => {
-      conn.end();
-      settle(err);
-    });
+async function connectOnce(creds: SSHCredentials, options: ConnectOptions): Promise<Client> {
+  assertNotAborted(options.signal);
+  const { promise, resolve, reject } = Promise.withResolvers<Client>();
+  const conn = new Client();
+  let settled = false;
+  const settle = (err?: Error) => {
+    if (settled) return;
+    settled = true;
+    conn.off("ready", onReady);
+    if (err) {
+      // Destroying an unfinished SSH handshake emits a final protocol error before close.
+      conn.once("close", () => conn.off("error", onError));
+    } else {
+      conn.off("error", onError);
+    }
+    conn.off("close", onClose);
+    options.signal?.removeEventListener("abort", onAbort);
+    if (err) reject(err);
+    else resolve(conn);
+  };
+  const onReady = () => settle();
+  const onError = (err: Error) => {
+    if (settled) return;
+    settle(err);
+    conn.end();
+  };
+  const onClose = () => {
+    settle(new SSHError("SSH 连接在握手完成前关闭"));
+    conn.off("error", onError);
+  };
+  const onAbort = () => {
+    settle(new AutoDLError("操作已取消"));
+    conn.destroy();
+  };
+  conn.once("ready", onReady);
+  conn.on("error", onError);
+  conn.once("close", onClose);
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
     conn.connect({
       host: creds.host,
       port: creds.port,
@@ -128,15 +154,15 @@ function connectOnce(creds: SSHCredentials, options: ConnectOptions): Promise<Cl
       password: creds.password,
       readyTimeout: options.connectTimeoutMs ?? 30_000,
       keepaliveInterval: options.keepaliveIntervalMs ?? 15_000,
-      // AutoDL's proxy hosts reuse addresses across instances, so a known_hosts
-      // check would fail constantly and teach users to ignore warnings.
-      algorithms: undefined,
     });
-  });
+  } catch (err) {
+    onError(err instanceof Error ? err : new Error(String(err)));
+  }
+  return promise;
 }
 
 /**
- * The single funnel for every SSH operation.
+ * The single funnel for every one-shot SSH operation.
  *
  * Each attempt re-reads the credentials, which covers both ways a connection can fail:
  * the port may have been reassigned since the snapshot was taken, and sshd may simply
@@ -149,29 +175,57 @@ export async function withSSH<T>(
   fn: (conn: Client, creds: SSHCredentials) => Promise<T>,
   options: ConnectOptions = {},
 ): Promise<T> {
+  const conn = await connectSSH(client, uuid, options);
+  const creds = (conn as unknown as { _creds?: SSHCredentials })._creds;
+  try {
+    // Fresh per connection, never cached across calls: connectSSH attaches the
+    // credentials used for this handshake and we detach them before closing.
+    if (!creds) throw new SSHError("SSH 连接缺少凭证上下文", { details: { uuid } });
+    return await fn(conn, creds);
+  } finally {
+    delete (conn as unknown as { _creds?: SSHCredentials })._creds;
+    conn.end();
+  }
+}
+
+/**
+ * Build one authenticated connection and hand ownership to the caller.
+ *
+ * Same retry policy as `withSSH` (fresh credentials per attempt, spaced retries
+ * for sshd-not-up-yet and port reassignment), except nothing is closed: the
+ * caller MUST eventually call `conn.end()`. Used for the file view's reusable
+ * browsing connection; one-shot operations should keep using `withSSH`.
+ */
+export async function connectSSH(
+  client: AutoDLClient,
+  uuid: string,
+  options: ConnectOptions = {},
+): Promise<Client> {
   let lastError: unknown;
   const attempts = Math.max(1, options.connectAttempts ?? 3);
 
   for (let attempt = 0; attempt < attempts; attempt++) {
+    assertNotAborted(options.signal);
     if (attempt > 0) {
       note(t("ssh.refreshing"));
-      await delay(RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS.at(-1) ?? 5_000);
+      await delay(RETRY_DELAYS_MS[attempt - 1] ?? RETRY_DELAYS_MS.at(-1) ?? 5_000, undefined, {
+        signal: options.signal,
+      });
     }
     const creds = await getCredentials(client, uuid, options);
+    assertNotAborted(options.signal);
 
-    let conn: Client;
     try {
-      conn = await connectOnce(creds, options);
+      const conn = await connectOnce(creds, options);
+      (conn as unknown as { _creds?: SSHCredentials })._creds = creds;
+      return conn;
     } catch (err) {
+      assertNotAborted(options.signal);
+      if (err instanceof Error && "level" in err && err.level === "client-authentication") {
+        throw new SSHError("SSH 认证失败，请重新获取实例凭证", { cause: err });
+      }
       lastError = err;
       debug(`SSH 连接 ${creds.host}:${creds.port} 失败：${(err as Error).message}`);
-      continue;
-    }
-
-    try {
-      return await fn(conn, creds);
-    } finally {
-      conn.end();
     }
   }
 

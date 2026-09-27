@@ -49,10 +49,10 @@ being saved, and you land on the dashboard. Once configured, `autodl` goes strai
 
 A live table of your instances: status, GPU, region, **how long each has been powered on
 and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
-detail, `s` start, `x` stop, `c` copy the SSH command to the clipboard, `ctrl+d` release, `g` GPU stock,
-`n` new instance, `r` refresh, `ctrl+l` log out, `q` quit. The two that change or destroy
-something take ctrl rather than a bare key; shift makes no difference to either, and the
-hints are printed all-lowercase so they do not read as bindings you hold shift for.
+detail, `s` start, `x` stop, `ctrl+d` release, `g` stock,
+`r` refresh, `ctrl+l` log out, `?` help, `q` quit. Release and logout require confirmation.
+The detail screen (`Enter`) owns the per-instance keys: `h` automatically authenticated
+SSH, `f` files, `t` transfers, `c` copy the SSH command, `n` new instance.
 
 `ctrl+d` release wipes the instance permanently, which is why it is not a bare `d`.
 
@@ -90,6 +90,60 @@ or keyboard hints.
 The TUI never runs in a pipe, in CI, or under `--json`: it exits with code 2 and an
 explanation instead of taking over a terminal that isn't there. A bare `autodl` outside
 an interactive terminal still prints help exactly as before.
+
+### SSH and file management
+
+Open the detail screen (`Enter`) and press `h`: it hands the entire terminal to a
+password-authenticated SSH session and restores the dashboard on exit or disconnect;
+this is not an embedded terminal. Credentials are
+fetched live and never placed in command arguments, logs, or transfer records.
+The CLI equivalent is `autodl ssh <id> --auto-auth`. This mode uses ssh2, not OpenSSH
+configuration. Keep using ordinary `autodl ssh <id>` for `~/.ssh/config`, agents and
+forwarding such as `-L`. The implementation uses cross-platform Node.js terminal and
+filesystem interfaces for Linux, macOS and native Windows; sshpass is not required.
+
+On the detail screen, `f` opens local/remote panes; narrow terminals show the active pane. `Tab` switches
+sides, arrows and Enter navigate, Space selects multiple entries, and `a` selects all.
+`g` accepts a directory path; `p` accepts source/destination paths directly.
+`u` transfers the selection to the opposite pane after confirming direction.
+`m` creates directories, `r` renames or moves within one side, and `x` permanently
+deletes after confirmation. `Q` opens the queue; Esc returns.
+
+Relative paths resolve against their corresponding pane. Selected source basenames
+are preserved: copying `project` into `/root/work` produces `/root/work/project`.
+The browser transfers explicitly selected directory contents, without the legacy
+`push` command's ignore rules. Symlinks and special files are skipped; queue details
+offer `v` to browse every skipped entry.
+
+Ordinary conflicts pause for `o` overwrite, `s` skip, or `b` keep both; `a` applies the
+choice to remaining conflicts in this task. Toggle `s` in the browser to synchronize
+one way: skip unchanged files, replace changed files in full, and **never delete
+destination-only files**. Size/mtime comparison is the default; `c` enables SHA-256
+comparison. Checksumming reads both files; remote contents are streamed over SFTP,
+so strict checking can cost as much bandwidth as downloading the files.
+
+The session queue is serial, with byte progress, speed, cancellation (`c`), details
+(Enter), and manual resume (`r`). Recoverable transport failures have bounded retries;
+authentication failures and powered-off instances pause instead. Starting a stopped
+instance to open SSH/files or resume a task always requires a billing confirmation.
+Automatic reconnect never powers an instance on.
+The file view holds one browsing connection for list/mkdir/rename/remove; directory
+contents are always read live, a dead connection reconnects on the next operation,
+and leaving the view releases it.
+The CLI `files` and `queue` commands share the same queue records: a task added via
+`queue add` can be confirmed and resumed from the dashboard, and vice versa.
+
+Transfers write same-directory `.autodl-*.part` files and commit only after completion,
+preserving existing destinations on interruption. Resume validates the source version
+and partial prefix, restarting changed/corrupt files. Remote replacement requires the
+OpenSSH atomic-rename extension; unsupported servers fail without deleting the old file.
+Credential-free records live under the config directory's `transfers/`, scoped by
+account and API endpoint. Exit/logout pauses unfinished work. Restored tasks require
+manual resume: **nothing runs in the background after exit**. Only one process may
+mutate an account's queue; dead-process ownership claims are recoverable.
+Cancelled tasks retain partial data; remove their `.part` files and local checkpoints
+only when you no longer need to resume them.
+
 
 ## Setup
 
@@ -303,9 +357,10 @@ same error contract; explicit help and version requests still print their normal
 | `info <id> [--show-password]` | Details, live SSH info, resource usage |
 | `create --gpu <spec>` | Create a pay-as-you-go Pro instance |
 | `start` / `stop` / `rm <id>` | Power on / off / release |
-| `ssh <id>` | Interactive login (extra flags pass through to `ssh`) |
+| `ssh <id> [--auto-auth]` | System OpenSSH with extra flags, or automatic instance-password authentication |
 | `exec <id> <cmd…>` | Run a command, stream output, propagate exit code |
-| `push` / `pull <id>` | SFTP transfer, recursive, respects ignore files |
+| `files ls/mkdir/mv/rm <id>` | Browse and manage instance files (SFTP, reused connection) |
+| `queue add/ls/resume/cancel/resolve` | Serial transfer queue, shared with the dashboard |
 | `run <cmd…>` | Create → sync → run → fetch → power off |
 | `deploy <repo>` | Create → clone → install deps → start → **stop, keeping data** |
 | `stock [--gpu] [--region]` | Live GPU stock per region |

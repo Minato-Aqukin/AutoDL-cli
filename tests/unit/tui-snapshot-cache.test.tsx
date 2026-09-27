@@ -102,10 +102,6 @@ async function until(check: () => boolean, what: string, timeoutMs = 2000): Prom
 /** Wait for `text` to appear on screen. */
 const untilFrame = (frame: () => string | undefined, text: string): Promise<void> =>
   until(() => plain(frame()).includes(text), `“${text}” on screen`);
-
-/** Wait for the clipboard to be written to at all; the caller asserts what landed. */
-const untilCopied = (): Promise<void> =>
-  until(() => copied.mock.calls.length > 0, "a clipboard write");
 const TOKEN = [
   "header",
   Buffer.from(JSON.stringify({ uid: 785976 })).toString("base64url"),
@@ -162,16 +158,18 @@ describe("SSH details across a power cycle", () => {
   it("copies the current boot's command", async () => {
     const { stdin, lastFrame } = mount();
     await untilFrame(lastFrame, "12.0%");
+    stdin.write("\r"); // the copy key lives on the detail screen now
+    await untilFrame(lastFrame, "p 显示/隐藏密码");
     stdin.write("c");
-    await untilCopied();
     expect(copied).toHaveBeenCalledWith("ssh -p 34222 root@connect.xxx.autodl.com");
   });
 
   it("copies the new port after the instance is power-cycled", async () => {
     const { stdin, lastFrame } = mount();
     await untilFrame(lastFrame, "12.0%");
+    stdin.write("\r"); // the copy key lives on the detail screen now
+    await untilFrame(lastFrame, "p 显示/隐藏密码");
     stdin.write("c");
-    await untilCopied();
     expect(copied).toHaveBeenCalledWith("ssh -p 34222 root@connect.xxx.autodl.com");
 
     // Stopped and started again: AutoDL hands out a fresh port and password.
@@ -180,8 +178,9 @@ describe("SSH details across a power cycle", () => {
     stdin.write("r");
     await untilFrame(lastFrame, "87.0%");
 
+    stdin.write("\r"); // still on the detail screen after the refresh
+    await untilFrame(lastFrame, "p 显示/隐藏密码");
     stdin.write("c");
-    await untilCopied();
     expect(copied).toHaveBeenCalledWith("ssh -p 51999 root@connect.xxx.autodl.com");
     expect(copied).not.toHaveBeenCalledWith("ssh -p 34222 root@connect.xxx.autodl.com");
   });

@@ -3,6 +3,7 @@ import { registerAccountCommands } from "./commands/account.js";
 import { registerAuthCommands } from "./commands/auth.js";
 import { registerCatalogCommands } from "./commands/catalog.js";
 import { registerDeployCommand } from "./commands/deploy.js";
+import { registerFileCommands } from "./commands/files.js";
 import { registerGuardCommands } from "./commands/guard.js";
 import { registerInstanceCommands } from "./commands/instances.js";
 import { registerMcpCommand } from "./commands/mcp.js";
@@ -42,6 +43,7 @@ export function buildProgram(): Command {
   registerAccountCommands(program);
   registerInstanceCommands(program);
   registerSSHCommands(program);
+  registerFileCommands(program);
   registerRunCommand(program);
   registerDeployCommand(program);
   registerGuardCommands(program);

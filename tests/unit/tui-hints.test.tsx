@@ -164,6 +164,8 @@ describe("the key hints name whoever owns the keyboard", () => {
     // at every step, so it is the only one the bar can safely add.
     const { stdin, lastFrame } = mount();
     await flush();
+    stdin.write(ENTER);
+    await flush();
     stdin.write("n");
     await flush();
     const hints = hintLine(lastFrame());

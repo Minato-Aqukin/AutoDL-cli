@@ -52,6 +52,7 @@ export function Login({
   const [token, setToken] = useState("");
 
   useInput((input, key) => {
+    if (key.ctrl && input.toLowerCase() === "c") return onQuit();
     if (verifying) return;
 
     if (stage === "menu") {

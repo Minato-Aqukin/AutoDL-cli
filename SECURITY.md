@@ -21,11 +21,17 @@ instances, which costs money — treat it like a payment credential.
   response. Showing them requires `--show-password` / `reveal_password: true`.
 - `AUTODL_TOKEN` takes precedence over the config file, so CI can pass a token without
   ever writing it to disk.
+- Automatic SSH authentication (`h` in the dashboard or `ssh --auto-auth`) keeps the
+  instance password in memory only; it is not printed or passed to another process.
+- Transfer queue/checkpoint records contain paths, instance IDs and transfer state,
+  not credentials. They are written with `0600` permissions under directories created
+  with `0700` (Windows additionally relies on the user's filesystem ACLs).
 
 ## Known, deliberate trade-offs
 
-**SSH host key checking is disabled** (`StrictHostKeyChecking=no`,
-`UserKnownHostsFile=/dev/null`). AutoDL's proxy hosts recycle addresses across instances,
+**SSH host key checking is disabled**, both in ssh2-based automatic sessions/SFTP and
+in system SSH (`StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`).
+AutoDL's proxy hosts recycle addresses across instances,
 so strict checking would produce a host key warning on essentially every new rental and
 train users to click through them. This means the SSH connection is not protected against
 an active man-in-the-middle on the path to AutoDL's proxy. If that's unacceptable for your

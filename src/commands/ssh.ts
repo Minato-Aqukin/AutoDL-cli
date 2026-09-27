@@ -1,10 +1,12 @@
 import type { Command } from "commander";
 import pc from "picocolors";
 import { parseDuration } from "../core/duration.js";
+import { UsageError } from "../core/errors.js";
 import { emit, formatBytes, isJson, note, printKeyValues, success } from "../output/format.js";
 import { connectInteractive } from "../ssh/connect.js";
 import { getCredentials } from "../ssh/credentials.js";
 import { execCommand } from "../ssh/exec.js";
+import { connectTerminal } from "../ssh/terminal.js";
 import { pull, push } from "../ssh/transfer.js";
 import { action } from "./helpers.js";
 
@@ -14,28 +16,47 @@ export function registerSSHCommands(program: Command): void {
     .description("交互式 SSH 登录实例")
     .option("--start", "实例未运行时自动开机", false)
     .option("--print", "只打印连接信息，不建立连接", false)
+    .option("--auto-auth", "使用实例密码自动认证（独占当前终端，不读取 OpenSSH 配置）", false)
     .allowUnknownOption()
     .action(
-      action(async (context, id: string, options: { start: boolean; print: boolean }, command) => {
-        if (options.print) {
-          const creds = await getCredentials(context.client, id, { autoStart: options.start });
-          emit(creds, () => {
-            printKeyValues([
-              ["命令", `ssh -p ${creds.port} ${creds.user}@${creds.host}`],
-              ["密码", creds.password],
-            ]);
-          });
-          return 0;
-        }
+      action(
+        async (
+          context,
+          id: string,
+          options: { start: boolean; print: boolean; autoAuth: boolean },
+          command,
+        ) => {
+          if (options.print) {
+            const creds = await getCredentials(context.client, id, { autoStart: options.start });
+            emit(creds, () => {
+              printKeyValues([
+                ["命令", `ssh -p ${creds.port} ${creds.user}@${creds.host}`],
+                ["密码", creds.password],
+              ]);
+            });
+            return 0;
+          }
 
-        // Anything commander didn't recognise is forwarded to the ssh binary, so
-        // `autodl ssh <id> -L 8888:localhost:8888` works as expected.
-        const extraArgs = (command as Command).args.slice(1);
-        return connectInteractive(context.client, id, {
-          autoStart: options.start,
-          extraArgs,
-        });
-      }),
+          // Anything commander didn't recognise is forwarded to the ssh binary, so
+          // `autodl ssh <id> -L 8888:localhost:8888` works as expected.
+          const extraArgs = (command as Command).args.slice(1);
+          if (options.autoAuth) {
+            if (isJson() || !process.stdin.isTTY || !process.stdout.isTTY) {
+              throw new UsageError("--auto-auth 需要交互式终端，不支持 --json");
+            }
+            if (extraArgs.length) {
+              throw new UsageError(
+                "--auto-auth 不接受 OpenSSH 参数；端口转发等场景请使用普通 autodl ssh",
+              );
+            }
+            return connectTerminal(context.client, id, { autoStart: options.start });
+          }
+          return connectInteractive(context.client, id, {
+            autoStart: options.start,
+            extraArgs,
+          });
+        },
+      ),
     );
 
   program

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { render } from "ink-testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BASE_IMAGES, DEFAULT_BASE_IMAGE, parseCudaVersion } from "../../src/core/catalog.js";
+import type { DashboardRow } from "../../src/tui/data.js";
 
 /**
  * What the create wizard actually sends.
@@ -33,16 +34,37 @@ vi.mock("../../src/core/endpoints/instance.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../../src/core/endpoints/account.js", () => ({
-  getBalance: vi.fn(async () => ({ balanceYuan: 100, accumulatedYuan: 20, voucherYuan: 0 })),
-}));
-
 vi.mock("../../src/tui/data.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/tui/data.js")>();
+  const row: DashboardRow = {
+    instance: {
+      uuid: "pro-new",
+      name: "demo",
+      status: "running",
+      subStatus: null,
+      machineId: null,
+      regionSign: "bj-B2",
+      regionName: "北京B区",
+      chargeType: "payg",
+      startMode: "gpu",
+      gpuSpec: "4090D",
+      gpuNum: 1,
+      createdAt: null,
+      startedAt: null,
+      stoppedAt: null,
+      expiredAt: null,
+      timedShutdownAt: null,
+    },
+    uptimeSeconds: 60,
+    priceYuanPerHour: 1.97,
+    estimatedCostYuan: 0.03,
+    ttlRemainingMs: 600_000,
+    ttlSeconds: 7200,
+  };
   return {
     ...actual,
     useInstances: () => ({
-      rows: [],
+      rows: [row],
       loading: false,
       error: null,
       authError: null,
@@ -101,6 +123,8 @@ describe("the create wizard's payload", () => {
     );
     await flush();
 
+    stdin.write(ENTER); // open the detail screen, which owns the create key
+    await flush();
     stdin.write("n"); // open the wizard
     await flush();
     stdin.write(ENTER); // accept the GPU
