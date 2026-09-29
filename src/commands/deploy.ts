@@ -1,10 +1,10 @@
 import type { Command } from "commander";
 import pc from "picocolors";
 import { formatDuration, parseDuration } from "../core/duration.js";
-import { resolveGitToken } from "../core/repo.js";
+import { parseRepo, resolveGitToken } from "../core/repo.js";
 import { emit, note, success, warn } from "../output/format.js";
 import { type DeployOptions, deployWorkflow } from "../workflow/deploy.js";
-import { action } from "./helpers.js";
+import { action, parseNumericFlag } from "./helpers.js";
 
 interface DeployCliOptions {
   gpu?: string;
@@ -16,12 +16,13 @@ interface DeployCliOptions {
   disk: string;
   name?: string;
   dir?: string;
-  setup?: string;
-  noSetup?: boolean;
+  // Commander folds `--no-setup` into `setup: false` (never a `noSetup` key) and
+  // `--no-accel` into `accel: false`; see context.ts for the same `--no-sweep` trap.
+  setup?: string | false;
   start?: string;
   detach: boolean;
   gitToken?: string;
-  noAccel?: boolean;
+  accel?: boolean;
   ttl: string;
   onFinish: "poweroff" | "release" | "keep";
   timeout?: string;
@@ -69,45 +70,46 @@ export function registerDeployCommand(program: Command): void {
           warn(`未知的 --on-finish "${options.onFinish}"，按 poweroff 处理`);
         }
 
-        // Ctrl-C must still reach cleanup, or the instance keeps billing.
+        // Ctrl-C must still reach cleanup, or the instance keeps billing. The first
+        // signal aborts the in-flight work; the handler then removes itself so a
+        // second signal falls through to Node's default and force-quits.
         const controller = new AbortController();
-        let interrupted = false;
-        const onSigint = () => {
-          if (interrupted) return;
-          interrupted = true;
-          warn("收到中断信号，正在安全收尾…");
+        const onSignal = (): void => {
+          process.off("SIGINT", onSignal);
+          process.off("SIGTERM", onSignal);
+          warn("收到中断信号，正在安全收尾…（再按一次 Ctrl-C 强制退出，但实例可能保持计费）");
           controller.abort();
         };
-        process.on("SIGINT", onSigint);
-        process.on("SIGTERM", onSigint);
+        process.on("SIGINT", onSignal);
+        process.on("SIGTERM", onSignal);
 
         try {
+          const repoHost = parseRepo(repo).host;
+          const gitToken = resolveGitToken(options.gitToken, repoHost);
           const deployOptions: DeployOptions = {
             repo,
             ...(options.gpu ? { gpu: options.gpu } : {}),
             ...(options.instance ? { instanceUuid: options.instance } : {}),
             ...(options.branch ? { branch: options.branch } : {}),
-            gpuNum: Number(options.num),
+            gpuNum: parseNumericFlag(options.num, "num", { integer: true, min: 1 }),
             ...(options.image ? { image: options.image } : {}),
             ...(options.region ? { regions: options.region } : {}),
-            diskGb: Number(options.disk),
+            diskGb: parseNumericFlag(options.disk, "disk", { integer: true, min: 0 }),
             ...(options.name ? { name: options.name } : {}),
             ...(options.dir ? { dir: options.dir } : {}),
-            ...(options.setup ? { setup: options.setup } : {}),
-            noSetup: options.noSetup === true,
+            ...(typeof options.setup === "string" ? { setup: options.setup } : {}),
+            noSetup: options.setup === false,
             ...(options.start ? { start: options.start } : {}),
             detach: options.detach,
-            ...(resolveGitToken(options.gitToken)
-              ? { gitToken: resolveGitToken(options.gitToken) as string }
-              : {}),
-            noAcceleration: options.noAccel === true,
+            ...(gitToken ? { gitToken } : {}),
+            noAcceleration: options.accel === false,
             ttlSeconds: parseDuration(options.ttl),
             onFinish: (["poweroff", "release", "keep"].includes(options.onFinish)
               ? options.onFinish
               : "poweroff") as DeployCliOptions["onFinish"],
             ...(options.timeout ? { commandTimeoutMs: parseDuration(options.timeout) * 1000 } : {}),
             ...(options.minBalance !== undefined
-              ? { minBalanceYuan: Number(options.minBalance) }
+              ? { minBalanceYuan: parseNumericFlag(options.minBalance, "min-balance", { min: 0 }) }
               : {}),
             ...(options.stockCheck === false ? { stockCheck: false } : {}),
             ...(Object.keys(env).length ? { env } : {}),
@@ -137,10 +139,18 @@ export function registerDeployCommand(program: Command): void {
             }
           });
 
+          if (result.cleanup.error) {
+            // finish() already warned with the instance id; the exit code is what an
+            // agent branches on in --json/MCP mode, where warn() is silent.
+            warn(
+              `收尾清理未完成：${result.cleanup.error}（实例 ${result.instanceUuid} 可能仍在计费）`,
+            );
+            return 1;
+          }
           return result.startCommand && !result.detached ? (result.exitCode ?? 1) : 0;
         } finally {
-          process.off("SIGINT", onSigint);
-          process.off("SIGTERM", onSigint);
+          process.off("SIGINT", onSignal);
+          process.off("SIGTERM", onSignal);
         }
       }),
     );

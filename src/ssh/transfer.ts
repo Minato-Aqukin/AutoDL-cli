@@ -1,12 +1,10 @@
-import { createReadStream, createWriteStream } from "node:fs";
-import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, posix, relative, resolve as resolvePath, sep } from "node:path";
-import { pipeline } from "node:stream/promises";
 import type { Client, SFTPWrapper } from "ssh2";
 import type { AutoDLClient } from "../core/client.js";
 import { AutoDLError, SSHError } from "../core/errors.js";
 import { debug } from "../output/format.js";
-import { type ConnectOptions, withSSH } from "./credentials.js";
+import { assertNotAborted, type ConnectOptions, withSSH } from "./credentials.js";
 
 export interface TransferProgress {
   file: string;
@@ -103,8 +101,15 @@ async function collectFiles(
         debug(`跳过 ${rel}`);
         continue;
       }
+      // Never follow local symlinks: a link loop would recurse forever and a
+      // link target outside the root would leak unrelated files.
+      if (entry.isSymbolicLink()) {
+        debug(`跳过符号链接 ${rel}`);
+        continue;
+      }
       if (entry.isDirectory()) await walk(absolute);
       else if (entry.isFile()) files.push(rel);
+      else debug(`跳过特殊文件 ${rel}`);
     }
   }
   await walk(root);
@@ -128,12 +133,99 @@ async function ensureRemoteDir(handle: SFTPWrapper, path: string): Promise<void>
   }
 }
 
-function uploadFile(handle: SFTPWrapper, local: string, remote: string): Promise<void> {
-  return pipeline(createReadStream(local), handle.createWriteStream(remote));
+function fastTransfer(
+  run: (
+    source: string,
+    target: string,
+    opts: {
+      concurrency?: number;
+      chunkSize?: number;
+      step?: (total: number, chunk: number, fileSize: number) => void;
+    },
+    callback: (err: Error | null | undefined) => void,
+  ) => void,
+  source: string,
+  target: string,
+  opts: { signal?: AbortSignal; onChunk?: (chunk: number) => void },
+): Promise<void> {
+  if (opts.signal?.aborted) return Promise.reject(new AutoDLError("操作已取消"));
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  let settled = false;
+  const done = (err?: Error | null): void => {
+    if (settled) return;
+    settled = true;
+    opts.signal?.removeEventListener("abort", onAbort);
+    if (err) reject(err);
+    else resolve();
+  };
+  const onAbort = (): void => {
+    done(new AutoDLError("操作已取消"));
+  };
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    // 64 x 32 KiB in flight is ssh2's own default; the partial file is
+    // removed by the caller so a cancelled transfer never looks complete.
+    run(
+      source,
+      target,
+      {
+        concurrency: 64,
+        chunkSize: 32 * 1024,
+        step: (_t, chunk) => {
+          opts.onChunk?.(chunk);
+        },
+      },
+      (err) => done(err ?? undefined),
+    );
+  } catch (err) {
+    done(err instanceof Error ? err : new Error(String(err)));
+  }
+  return promise;
 }
 
-function downloadFile(handle: SFTPWrapper, remote: string, local: string): Promise<void> {
-  return pipeline(handle.createReadStream(remote), createWriteStream(local));
+function uploadFile(
+  handle: SFTPWrapper,
+  local: string,
+  remote: string,
+  opts: { signal?: AbortSignal; onChunk?: (chunk: number) => void } = {},
+): Promise<void> {
+  return fastTransfer(handle.fastPut.bind(handle), local, remote, opts).catch((err: Error) => {
+    const cleanup = new Promise<void>((resolve) => {
+      handle.unlink(remote, () => resolve());
+    });
+    return cleanup.then(() => {
+      throw err;
+    });
+  });
+}
+
+function isMissing(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err.code === "ENOENT" || err.code === 2)
+  );
+}
+
+function downloadFile(
+  handle: SFTPWrapper,
+  remote: string,
+  local: string,
+  opts: { signal?: AbortSignal; onChunk?: (chunk: number) => void } = {},
+): Promise<void> {
+  return fastTransfer(handle.fastGet.bind(handle), remote, local, opts).catch((err: Error) =>
+    // fastGet creates the local file only after the remote open succeeds, so
+    // a remote failure (or an abort in that window) leaves nothing to delete:
+    // swallow ENOENT and rethrow the original error, never the unlink's.
+    unlink(local)
+      .catch((unlinkErr: unknown) => {
+        if (!isMissing(unlinkErr)) throw unlinkErr;
+      })
+      .then(() => {
+        throw err;
+      }),
+  );
 }
 
 function statRemote(handle: SFTPWrapper, path: string) {
@@ -145,16 +237,29 @@ function statRemote(handle: SFTPWrapper, path: string) {
   });
 }
 
-function readdirRemote(handle: SFTPWrapper, path: string) {
-  return new Promise<{ name: string; isDirectory: boolean }[]>((resolve, reject) => {
+function readdirRemote(
+  handle: SFTPWrapper,
+  path: string,
+): Promise<
+  { name: string; isDirectory: boolean; isFile: boolean; isLink: boolean; size: number }[]
+> {
+  return new Promise((resolve, reject) => {
     handle.readdir(path, (err, list) => {
       if (err) reject(new AutoDLError(`无法列出远程目录：${path}`, { cause: err }));
       else
         resolve(
-          list.map((item) => ({
-            name: item.filename,
-            isDirectory: (item.attrs.mode & 0o170000) === 0o040000,
-          })),
+          list
+            .filter((item) => item.filename !== "." && item.filename !== "..")
+            .map((item) => {
+              const mode = item.attrs.mode & 0o170000;
+              return {
+                name: item.filename,
+                isDirectory: mode === 0o040000,
+                isFile: mode === 0o100000,
+                isLink: mode === 0o120000,
+                size: item.attrs.size,
+              };
+            }),
         );
     });
   });
@@ -174,8 +279,13 @@ export async function push(
   options: TransferOptions = {},
 ): Promise<TransferSummary> {
   const local = resolvePath(localPath);
+  // Follow an explicitly named top-level link (datasets, HF cache blobs and
+  // `run --sync <link>` all legitimately point at links); nested links inside
+  // a walked directory are still skipped by collectFiles.
   const info = await stat(local).catch(() => null);
   if (!info) throw new AutoDLError(`本地路径不存在：${localPath}`);
+  if (!info.isFile() && !info.isDirectory())
+    throw new AutoDLError(`本地路径不是普通文件或目录：${localPath}`);
 
   return withSSH(
     client,
@@ -187,26 +297,32 @@ export async function push(
           const target = remotePath.endsWith("/")
             ? posix.join(remotePath, basename(local))
             : remotePath;
+          assertNotAborted(options.signal);
           await ensureRemoteDir(handle, posix.dirname(target));
-          await uploadFile(handle, local, target);
+          await uploadFile(handle, local, target, { signal: options.signal });
           options.onProgress?.({ file: basename(local), index: 1, total: 1, bytes: info.size });
           return { files: 1, bytes: info.size };
         }
 
         const ignored = await buildIgnoreMatcher(local, options);
         const files = await collectFiles(local, ignored);
+        assertNotAborted(options.signal);
         await ensureRemoteDir(handle, remotePath);
 
         let bytes = 0;
         // Create every directory up front so uploads never race on a missing parent.
         const dirs = new Set(files.map((f) => posix.dirname(f)).filter((d) => d !== "."));
         for (const dir of [...dirs].sort()) {
+          assertNotAborted(options.signal);
           await ensureRemoteDir(handle, posix.join(remotePath, dir));
         }
         for (const [index, rel] of files.entries()) {
+          assertNotAborted(options.signal);
           const source = join(local, rel);
           const size = (await stat(source)).size;
-          await uploadFile(handle, source, posix.join(remotePath, rel));
+          await uploadFile(handle, source, posix.join(remotePath, rel), {
+            signal: options.signal,
+          });
           bytes += size;
           options.onProgress?.({ file: rel, index: index + 1, total: files.length, bytes: size });
         }
@@ -227,6 +343,11 @@ export async function pull(
   localPath: string,
   options: TransferOptions = {},
 ): Promise<TransferSummary> {
+  // resolve() strips trailing separators, so directory intent must come from the
+  // raw argument or the filesystem — never from the resolved path.
+  const intoDir =
+    /[/\\]$/.test(localPath) ||
+    (await stat(resolvePath(localPath)).catch(() => null))?.isDirectory() === true;
   const local = resolvePath(localPath);
 
   return withSSH(
@@ -237,9 +358,10 @@ export async function pull(
       try {
         const info = await statRemote(handle, remotePath);
         if (!info.isDirectory) {
-          const target = local.endsWith(sep) ? join(local, basename(remotePath)) : local;
+          const target = intoDir ? join(local, basename(remotePath)) : local;
+          assertNotAborted(options.signal);
           await mkdir(dirname(target), { recursive: true });
-          await downloadFile(handle, remotePath, target);
+          await downloadFile(handle, remotePath, target, { signal: options.signal });
           options.onProgress?.({
             file: basename(remotePath),
             index: 1,
@@ -249,22 +371,37 @@ export async function pull(
           return { files: 1, bytes: info.size };
         }
 
+        // readdir ships per-entry attrs (mode/size): reuse them instead of an
+        // extra STAT per file. Only regular files are downloaded; symlinks,
+        // FIFOs, sockets and devices are skipped (opening a FIFO would block
+        // until a writer appears).
         const collected: { remote: string; rel: string; size: number }[] = [];
+        const skippedNames: string[] = [];
         const walk = async (dir: string, prefix: string): Promise<void> => {
+          assertNotAborted(options.signal);
           for (const entry of await readdirRemote(handle, dir)) {
             const remote = posix.join(dir, entry.name);
             const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-            if (entry.isDirectory) await walk(remote, rel);
-            else collected.push({ remote, rel, size: (await statRemote(handle, remote)).size });
+            if (entry.isDirectory) {
+              await walk(remote, rel);
+              continue;
+            }
+            if (!entry.isFile) {
+              skippedNames.push(`${rel} (special, skipped)`);
+              continue;
+            }
+            collected.push({ remote, rel, size: entry.size });
           }
         };
         await walk(remotePath, "");
+        if (skippedNames.length) debug(`跳过 ${skippedNames.length} 个链接/特殊文件`);
 
         let bytes = 0;
         for (const [index, item] of collected.entries()) {
+          assertNotAborted(options.signal);
           const target = join(local, item.rel);
           await mkdir(dirname(target), { recursive: true });
-          await downloadFile(handle, item.remote, target);
+          await downloadFile(handle, item.remote, target, { signal: options.signal });
           bytes += item.size;
           options.onProgress?.({
             file: item.rel,

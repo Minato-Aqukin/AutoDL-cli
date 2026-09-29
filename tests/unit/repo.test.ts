@@ -131,3 +131,57 @@ describe("resolveGitToken", () => {
     expect(resolveGitToken()).toBeUndefined();
   });
 });
+
+describe("parseRepo edge forms", () => {
+  it("preserves an explicit port in host and cloneUrl", () => {
+    const repo = parseRepo("https://git.example.com:8443/team/proj");
+    expect(repo.host).toBe("git.example.com:8443");
+    expect(repo.cloneUrl).toBe("https://git.example.com:8443/team/proj.git");
+  });
+
+  it("parses ssh:// URLs instead of producing host `ssh`", () => {
+    const repo = parseRepo("ssh://git@gitlab.com/team/proj.git");
+    expect(repo.host).toBe("gitlab.com");
+    expect(repo.path).toBe("team/proj");
+    expect(repo.cloneUrl).toBe("https://gitlab.com/team/proj.git");
+  });
+});
+
+describe("resolveGitToken host scoping", () => {
+  it("keeps an explicit token first and treats GIT_TOKEN as universal", () => {
+    process.env.GIT_TOKEN = "git-token";
+    process.env.GITHUB_TOKEN = "github-token";
+    process.env.GITEE_TOKEN = "gitee-token";
+    try {
+      expect(resolveGitToken("flag", "gitee.com")).toBe("flag");
+      expect(resolveGitToken(undefined, "gitee.com")).toBe("git-token");
+    } finally {
+      delete process.env.GIT_TOKEN;
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITEE_TOKEN;
+    }
+  });
+
+  it("scopes GITHUB_TOKEN to github.com and a missing host", () => {
+    process.env.GITHUB_TOKEN = "github-token";
+    process.env.GITEE_TOKEN = "gitee-token";
+    try {
+      expect(resolveGitToken(undefined, "github.com")).toBe("github-token");
+      expect(resolveGitToken(undefined)).toBe("github-token");
+      expect(resolveGitToken(undefined, "gitlab.com")).toBeUndefined();
+    } finally {
+      delete process.env.GITHUB_TOKEN;
+      delete process.env.GITEE_TOKEN;
+    }
+  });
+
+  it("scopes GITEE_TOKEN to gitee.com only", () => {
+    process.env.GITEE_TOKEN = "gitee-token";
+    try {
+      expect(resolveGitToken(undefined, "gitee.com")).toBe("gitee-token");
+      expect(resolveGitToken(undefined, "github.com")).toBeUndefined();
+    } finally {
+      delete process.env.GITEE_TOKEN;
+    }
+  });
+});

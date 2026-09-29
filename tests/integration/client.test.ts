@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { AutoDLClient, mapEnvelopeError, redactToken } from "../../src/core/client.js";
 import {
   AuthError,
+  AutoDLError,
   BudgetError,
   NoStockError,
   NotFoundError,
@@ -207,5 +208,57 @@ describe("mapEnvelopeError", () => {
     const error = mapEnvelopeError("SomeNewCode", "未知错误");
     expect(error.code).toBe("API_ERROR");
     expect(error.exitCode).toBe(1);
+  });
+});
+
+describe("interrupted response bodies", () => {
+  it("retries a mid-body reset as a retriable NETWORK error", async () => {
+    let hits = 0;
+    const impl = (async () => {
+      hits++;
+      if (hits === 1) {
+        return {
+          status: 200,
+          text: async () => {
+            throw new TypeError("terminated");
+          },
+        };
+      }
+      return new Response(JSON.stringify({ code: "Success", msg: "", data: "ok" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+    await expect(
+      makeClient(impl, { maxRetries: 2 }).post("/api/v1/dev/wallet/balance", {}),
+    ).resolves.toBe("ok");
+    expect(hits).toBe(2);
+  });
+
+  it("maps a body stall past the timeout to TimeoutError", async () => {
+    const impl = (async (_input: unknown, init?: RequestInit) => {
+      // Headers resolve immediately; the body hangs until the client aborts.
+      const gate = new Promise<string>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      });
+      return { status: 200, text: () => gate };
+    }) as unknown as typeof fetch;
+    await expect(
+      makeClient(impl, { maxRetries: 0, timeoutMs: 20 }).post("/api/v1/dev/wallet/balance", {}),
+    ).rejects.toThrow(TimeoutError);
+  });
+});
+
+describe("unshaped error envelopes", () => {
+  it("maps a GET envelope without a message to a classified error, not a TypeError", async () => {
+    const fetchMock = mockFetch([
+      { path: "/api/v1/dev/instance/pro/status", response: { code: "Unauthorized", data: null } },
+    ]);
+    const err = await makeClient(fetchMock.impl, { maxRetries: 0 })
+      .get("/api/v1/dev/instance/pro/status", { instance_uuid: "pro-1" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(AutoDLError);
+    if (err instanceof AutoDLError) expect(err.code).not.toBe("GENERIC");
   });
 });

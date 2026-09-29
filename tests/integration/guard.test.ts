@@ -1,11 +1,17 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { listTracked, trackInstance } from "../../src/config/state.js";
 import { AutoDLClient } from "../../src/core/client.js";
-import { BudgetError } from "../../src/core/errors.js";
-import { assertBudget } from "../../src/guard/budget.js";
+import { BudgetError, UsageError } from "../../src/core/errors.js";
+import { assertBudget, resolveMinBalance } from "../../src/guard/budget.js";
 import { mockFetch } from "../fixtures/mock-fetch.js";
+
+const execFileAsync = promisify(execFile);
 
 /**
  * The guards are the reason this tool is safe to hand to an agent, so they are tested
@@ -215,5 +221,79 @@ describe("the TTL sweep", () => {
       alreadyStopped: [],
       failed: [],
     });
+  });
+});
+
+describe("the minimum-balance threshold", () => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "rejects an explicit non-finite %s with a usage error",
+    (value) => {
+      expect(() => resolveMinBalance(value)).toThrow(UsageError);
+    },
+  );
+
+  it("still honours explicit 0 (disable) and positive values", () => {
+    expect(resolveMinBalance(0)).toBe(0);
+    expect(resolveMinBalance(10)).toBe(10);
+  });
+});
+
+describe("the TTL ledger survives crashes", () => {
+  it("replaces state.json atomically (same-dir temp + rename, 0600)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "autodl-ledger-"));
+    const previous = process.env.AUTODL_CONFIG_DIR;
+    process.env.AUTODL_CONFIG_DIR = dir;
+    try {
+      trackInstance({
+        uuid: "pro-1",
+        ttlSeconds: 60,
+        expiresAt: Date.now() + 60_000,
+        createdAt: Date.now(),
+        inInstanceTimer: false,
+      });
+      expect(listTracked()).toHaveLength(1);
+      const st = await stat(join(dir, "state.json"));
+      expect(st.mode & 0o777).toBe(0o600);
+      const raw = await readFile(join(dir, "state.json"), "utf8");
+      expect(JSON.parse(raw).tracked["pro-1"]).toBeDefined();
+    } finally {
+      if (previous === undefined) delete process.env.AUTODL_CONFIG_DIR;
+      else process.env.AUTODL_CONFIG_DIR = previous;
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps every entry when several processes record TTLs at once", async () => {
+    // An agent launching parallel `run --ttl` jobs, or the MCP server and the CLI both
+    // creating instances: each process must not overwrite the others' entries.
+    const dist = pathToFileURL(fileURLToPath(new URL("../../dist/index.js", import.meta.url)));
+    const script = [
+      `const { recordTTL } = await import(${JSON.stringify(dist.href)});`,
+      "const id = process.argv[1];",
+      'for (let i = 0; i < 25; i++) recordTTL({ uuid: "pro-" + id + "-" + i, ttlSeconds: 60, inInstanceTimer: true });',
+    ].join("\n");
+    const env = { ...process.env, AUTODL_CONFIG_DIR: configDir };
+    await Promise.all(
+      Array.from({ length: 6 }, (_, id) =>
+        execFileAsync(process.execPath, ["--input-type=module", "-e", script, String(id)], { env }),
+      ),
+    );
+    expect(listTracked()).toHaveLength(6 * 25);
+  }, 30_000);
+
+  it("recovers from a lock left behind by a crashed process", async () => {
+    // Without recovery every later command would block on the ledger forever.
+    const lock = join(configDir, "state.json.lock");
+    await writeFile(lock, "4242:crashed");
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(lock, longAgo, longAgo);
+    trackInstance({
+      uuid: "pro-after-crash",
+      ttlSeconds: 60,
+      expiresAt: Date.now() + 60_000,
+      createdAt: Date.now(),
+      inInstanceTimer: true,
+    });
+    expect(listTracked().map((entry) => entry.uuid)).toEqual(["pro-after-crash"]);
   });
 });

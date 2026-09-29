@@ -27,6 +27,7 @@ vi.mock("../../src/ssh/exec.js", () => ({
 }));
 
 const { AutoDLClient } = await import("../../src/core/client.js");
+const { waitForStatus } = await import("../../src/core/waiters.js");
 const { deployWorkflow } = await import("../../src/workflow/deploy.js");
 const { configureOutput } = await import("../../src/output/format.js");
 const { mockFetch } = await import("../fixtures/mock-fetch.js");
@@ -381,6 +382,19 @@ describe("lifecycle — stop, do not release", () => {
     expect(fetchMock.calls.some((c) => c.url.includes("power_off"))).toBe(true);
   });
 
+  it("reports a failed power-off in the error when the deploy itself failed", async () => {
+    // The thrown error is all an agent sees on this path; a swallowed cleanup failure
+    // would leave it believing the instance was stopped.
+    ssh.responses.push({ match: "git clone", exitCode: 128 });
+    const fetchMock = mockFetch([
+      ...routes().filter((route) => route.path !== POWER_OFF),
+      { path: POWER_OFF, response: { code: "Failed", msg: "实例状态异常", data: null } },
+    ]);
+    const failure = deployWorkflow(client(fetchMock.impl), base);
+    await expect(failure).rejects.toThrow(/拉取仓库失败/);
+    await expect(failure).rejects.toThrow(/收尾也失败：实例 pro-\S+ 可能仍在计费/);
+  });
+
   it("keeps the instance running when the service was detached", async () => {
     // Shutting down would kill the very service we just backgrounded.
     const fetchMock = mockFetch(routes());
@@ -480,5 +494,49 @@ describe("region handling", () => {
       deployWorkflow(client(fetchMock.impl), { ...base, regions: ["chongqingDC1"] }),
     ).rejects.toThrow(/不支持创建 Pro 实例/);
     expect(fetchMock.calls.some((c) => c.url.includes("/create"))).toBe(false);
+  });
+});
+
+describe("waiting for a status honours cancellation", () => {
+  it("makes zero polls when already aborted before the first poll", async () => {
+    const fetchMock = mockFetch([
+      {
+        path: STATUS,
+        response: { code: "Success", msg: "", data: "starting" },
+      },
+    ]);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      waitForStatus(client(fetchMock.impl), "pro-1", ["running"], {
+        signal: controller.signal,
+        intervalMs: 1,
+        timeoutMs: 1000,
+      }),
+    ).rejects.toThrow("操作已取消");
+    expect(fetchMock.calls).toHaveLength(0);
+  });
+
+  it("stops after an abort that lands mid-poll instead of polling on", async () => {
+    const controller = new AbortController();
+    let polls = 0;
+    const fetchMock = mockFetch([
+      {
+        path: STATUS,
+        response: () => {
+          polls++;
+          if (polls === 1) controller.abort();
+          return { code: "Success", msg: "", data: "starting" };
+        },
+      },
+    ]);
+    await expect(
+      waitForStatus(client(fetchMock.impl), "pro-1", ["running"], {
+        signal: controller.signal,
+        intervalMs: 1,
+        timeoutMs: 5000,
+      }),
+    ).rejects.toThrow("操作已取消");
+    expect(polls).toBe(1);
   });
 });

@@ -1,5 +1,5 @@
 import type { AutoDLClient } from "../client.js";
-import { NotFoundError, UsageError } from "../errors.js";
+import { AutoDLError, NotFoundError, UsageError } from "../errors.js";
 import {
   type Instance,
   type InstanceSnapshot,
@@ -157,7 +157,22 @@ export async function powerOnInstance(
 }
 
 export async function powerOffInstance(client: AutoDLClient, uuid: string): Promise<void> {
-  await client.post("/api/v1/dev/instance/pro/power_off", { instance_uuid: uuid });
+  try {
+    await client.post("/api/v1/dev/instance/pro/power_off", { instance_uuid: uuid });
+  } catch (err) {
+    // A retry after an ambiguous failure (timeout, 5xx) lands on an instance that is
+    // already shutting down, and AutoDL rejects the duplicate
+    // ("当前实例正在关机中,无需重复操作") with a non-retriable API_ERROR. The stop
+    // still succeeded, so treat that wording as success rather than failing `stop`,
+    // `run`/`deploy` cleanup, `watchIdle` and the sweep after the fact.
+    if (
+      err instanceof AutoDLError &&
+      /正在关机|无需重复|已经关机|已关机|shutting down/i.test(err.message)
+    ) {
+      return;
+    }
+    throw err;
+  }
 }
 
 /** AutoDL requires the instance to be shut down first; this is irreversible. */

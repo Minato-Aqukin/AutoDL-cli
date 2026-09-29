@@ -90,8 +90,9 @@ export function registerSSHCommands(program: Command): void {
 
           const result = await execCommand(context.client, id, remoteCommand, {
             autoStart: options.start,
-            capture: true,
-            // Humans expect `autodl exec box "cat f" > out.txt` to work, so remote
+            // Human mode streams to stdout and discards the payload, so don't
+            // buffer it: capture only when something reads result.stdout.
+            capture: isJson(),
             // stdout goes to stdout. In --json mode (and under MCP, which sets it)
             // stdout is reserved for the payload, so it is diverted to stderr.
             stdout: isJson() ? process.stderr : process.stdout,

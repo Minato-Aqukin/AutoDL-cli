@@ -124,4 +124,33 @@ describe("release binding", () => {
     expect(out).not.toContain("Ctrl");
     expect(out).not.toContain("· D 释放");
   });
+
+  it("asks before quitting mid-release, then stops waiting on the shutdown", async () => {
+    // A release waits up to ten minutes for the shutdown; quitting used to leave the
+    // process hanging on that wait with the terminal already handed back.
+    let signal: AbortSignal | undefined;
+    destroy.mockImplementation(
+      (_client: unknown, _uuid: string, options: { signal: AbortSignal }) =>
+        new Promise<void>((_resolve, reject) => {
+          signal = options.signal;
+          signal.addEventListener("abort", () => reject(new Error("操作已取消")));
+        }),
+    );
+    const { stdin, lastFrame } = mount();
+    await flush();
+    stdin.write(CTRL_D);
+    await flush();
+    stdin.write("y");
+    await flush();
+    expect(signal?.aborted).toBe(false);
+
+    stdin.write("q");
+    await flush();
+    expect(plain(lastFrame())).toContain("中止释放并退出");
+    expect(signal?.aborted).toBe(false);
+
+    stdin.write("y");
+    await flush();
+    expect(signal?.aborted).toBe(true);
+  });
 });

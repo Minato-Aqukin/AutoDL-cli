@@ -24,14 +24,26 @@ import { execCommand } from "../ssh/exec.js";
 const PID_FILE = "/tmp/.autodl-cli-ttl.pid";
 
 /**
+ * Shell test: is `$pid` our live timer? The timer is the `( sleep N && shutdown )`
+ * subshell: its cmdline carries the snippet when launched via `bash -c`, and it has a
+ * `sleep` child however it was launched (AutoDL may run start_command from a file).
+ * Checking the recorded PID this way means a stale pid file from an earlier boot can
+ * never get an unrelated process killed.
+ */
+const IS_TIMER =
+  `{ tr '\\0' ' ' 2>/dev/null < /proc/$pid/cmdline | grep -q 'shutdown -h now' || ` +
+  `grep -qsx sleep $(sed 's#[0-9][0-9]*#/proc/&/comm#g' 2>/dev/null < /proc/$pid/task/$pid/children) /dev/null; }`;
+
+/**
  * Shell snippet that arms the in-instance timer.
  *
  * Deliberately quote-free: it is embedded in AutoDL's `start_command` field, and we
  * can't see how that string is re-parsed on their side. A subshell with `&&` expresses
- * "wait then shut down" without a single quote character.
+ * "wait then shut down" without a single quote character. The trailing `echo $!`
+ * records the timer PID so `disarmTTLOverSSH` can cancel it later.
  */
 export function buildTTLSnippet(seconds: number): string {
-  return `(sleep ${seconds} && /usr/bin/shutdown -h now) >/dev/null 2>&1 &`;
+  return `(sleep ${seconds} && /usr/bin/shutdown -h now) >/dev/null 2>&1 & echo $! > ${PID_FILE};`;
 }
 
 /** Compose the boot command: arm the timer first, then run whatever the user asked for. */
@@ -55,11 +67,13 @@ export async function armTTLOverSSH(
   seconds: number,
 ): Promise<boolean> {
   // Quoting is safe here — we own the whole command string, unlike start_command.
-  const command = [
-    `if [ -f ${PID_FILE} ]; then kill "$(cat ${PID_FILE})" 2>/dev/null || true; fi`,
-    `(sleep ${seconds} && /usr/bin/shutdown -h now) >/dev/null 2>&1 &`,
-    `echo $! > ${PID_FILE}`,
-  ].join("; ");
+  // NOTE: the backgrounding `&` already terminates the subshell command, so the PID
+  // record must follow it with a plain space (`& echo ...`), never `&;`, which is a
+  // syntax error in bash/sh and aborts the whole script before anything runs.
+  const command =
+    `pid=$(cat ${PID_FILE} 2>/dev/null || true); ` +
+    `if [ -n "$pid" ] && ${IS_TIMER}; then kill "$pid" 2>/dev/null || true; fi; ` +
+    `(sleep ${seconds} && /usr/bin/shutdown -h now) >/dev/null 2>&1 & echo $! > ${PID_FILE}`;
 
   try {
     const result = await execCommand(client, uuid, command, { capture: true, timeoutMs: 30_000 });
@@ -74,11 +88,33 @@ export async function armTTLOverSSH(
   }
 }
 
-/** Cancel a previously armed in-instance timer. */
+/**
+ * Cancel a previously armed in-instance timer.
+ *
+ * Returns `true` only when the remote script confirms the recorded timer is no longer
+ * running (killed now, or already gone). Returns `false` when there is no PID record to
+ * act on, the timer survived the kill, or SSH itself failed, so callers can warn instead
+ * of claiming a cancel that did nothing.
+ *
+ * Only the recorded PID is ever signalled, and only after its cmdline proves it is our
+ * timer. Matching by pattern instead (pkill -f) would also hit the boot shell that ran
+ * `start_command`, whose cmdline contains the same snippet and which may be the parent
+ * of the user's workload.
+ */
 export async function disarmTTLOverSSH(client: AutoDLClient, uuid: string): Promise<boolean> {
-  const command = `if [ -f ${PID_FILE} ]; then kill "$(cat ${PID_FILE})" 2>/dev/null; rm -f ${PID_FILE}; fi; /usr/bin/shutdown -c 2>/dev/null || true`;
+  // Quoting is safe here — we own the whole command string, unlike start_command.
+  const command =
+    `pid=$(cat ${PID_FILE} 2>/dev/null || true); ` +
+    `if [ -z "$pid" ]; then echo NO_RECORD; exit 1; fi; ` +
+    `if ${IS_TIMER}; then kill "$pid" 2>/dev/null || true; sleep 1; ` +
+    `if ${IS_TIMER}; then echo STILL_RUNNING; exit 1; fi; fi; ` +
+    `rm -f ${PID_FILE}; /usr/bin/shutdown -c 2>/dev/null || true; echo OK`;
   try {
-    await execCommand(client, uuid, command, { capture: false, timeoutMs: 30_000 });
+    const result = await execCommand(client, uuid, command, { capture: true, timeoutMs: 30_000 });
+    if (result.exitCode !== 0) {
+      debug(`取消定时关机未确认：${result.stdout.trim() || result.stderr.trim()}`);
+      return false;
+    }
     return true;
   } catch {
     return false;

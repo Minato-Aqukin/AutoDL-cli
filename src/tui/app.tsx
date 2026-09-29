@@ -70,7 +70,7 @@ type Pending =
   | null;
 
 const DASHBOARD_KEYS =
-  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · ctrl+d 释放 · g 库存 · r 刷新 · ctrl+l 退出登录 · ? 帮助 · q 退出";
+  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · n 新建 · ctrl+d 释放 · g 库存 · r 刷新 · ctrl+l 退出登录 · ? 帮助 · q 退出";
 
 /**
  * ctrl+<letter>, whatever the shift state.
@@ -130,9 +130,14 @@ export function App({
   const [fileGate, setFileGate] = useState<Promise<void> | undefined>(undefined);
   const queueRef = useRef<TransferQueue | null>(null);
   const accessController = useRef<AbortController | null>(null);
-  const fileUuidRef = useRef("");
+  /** A release waiting out its shutdown; quitting must stop that wait, not hang on it. */
+  const releasing = useRef<{ uuid: string; controller: AbortController } | null>(null);
   const queueUnsubscribe = useRef<(() => void) | null>(null);
   const [queueNotice, setQueueNotice] = useState<string | null>(null);
+  const workspaceRef = useRef<FileWorkspace | null>(null);
+  useEffect(() => {
+    workspaceRef.current = workspace;
+  }, [workspace]);
   /**
    * The running instance whose snapshot the poll keeps fresh.
    *
@@ -228,19 +233,25 @@ export function App({
    * one from an earlier action would fire mid-way through the next message and blank it
    * — and so quitting does not leave a pending timer holding the event loop open, which
    * kept the shell prompt away for up to six seconds after the TUI had already closed.
+   * Late flashes are dropped for the same reason: an action that resolves after quit
+   * would otherwise re-arm the loop with a timer nothing clears.
    */
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const noticeTimer = useRef<NodeJS.Timeout | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      clearTimeout(noticeTimer.current ?? undefined);
+      noticeTimer.current = null;
+    };
+  }, []);
   const flash = useCallback((message: string) => {
+    if (!mountedRef.current) return;
     setNotice(message);
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    clearTimeout(noticeTimer.current ?? undefined);
     noticeTimer.current = setTimeout(() => setNotice(null), 6000);
   }, []);
-  useEffect(
-    () => () => {
-      if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    },
-    [],
-  );
 
   const getQueue = useCallback(() => {
     if (!queueRef.current) {
@@ -275,10 +286,14 @@ export function App({
   useEffect(
     () => () => {
       accessController.current?.abort();
+      releasing.current?.controller.abort();
       queueUnsubscribe.current?.();
       void queueRef.current?.dispose().catch((err: Error) => {
         process.stderr.write(`传输队列关闭失败：${err.message}\n`);
       });
+      // FilesScreen never disposes: the workspace outlives its mounts, so App
+      // releases it here. A ref avoids re-running this on every workspace swap.
+      workspaceRef.current?.dispose();
     },
     [],
   );
@@ -291,7 +306,7 @@ export function App({
 
   const requestExit = useCallback(() => {
     accessController.current?.abort();
-    if (queueRef.current?.hasPending()) setPending({ kind: "exit" });
+    if (queueRef.current?.hasPending() || releasing.current) setPending({ kind: "exit" });
     else exit();
   }, [exit]);
   const finishLogout = async (reason?: string) => {
@@ -306,9 +321,12 @@ export function App({
     }
   };
   const finishExit = async () => {
-    if (busy) return;
+    if (busy && !releasing.current) return;
     setBusy(true);
     try {
+      // Stops the shutdown wait so the process can end; the power_off already took
+      // effect, and nothing is released after the abort.
+      releasing.current?.controller.abort();
       if (queueRef.current) await queueRef.current.pauseAll();
       exit();
     } catch (err) {
@@ -320,15 +338,24 @@ export function App({
   const act = useCallback(
     async (label: string, fn: () => Promise<string>) => {
       setBusy(true);
+      // Drop any pending flash-clear first: it would otherwise blank this label
+      // mid-operation (a release can run for minutes behind waitForShutdown).
+      clearTimeout(noticeTimer.current ?? undefined);
+      noticeTimer.current = null;
       setNotice(`${label}…`);
       try {
         flash(await fn());
       } catch (err) {
+        // After quitting, an aborted action has nobody left to report to, and a
+        // refresh would only start another request that keeps the process alive.
+        if (!mountedRef.current) return;
         flash(`✖ ${label}失败：${(err as Error).message}`);
         noteAuthFailure(err);
       } finally {
-        setBusy(false);
-        refresh();
+        if (mountedRef.current) {
+          setBusy(false);
+          refresh();
+        }
       }
     },
     [flash, refresh, noteAuthFailure],
@@ -372,16 +399,26 @@ export function App({
     async (action: AccessAction, signal?: AbortSignal) => {
       if (signal?.aborted) return;
       if (action.kind === "files") {
-        setWorkspace((prev) =>
-          prev && fileUuidRef.current === action.uuid
-            ? prev
-            : new FileWorkspace(client, action.uuid),
-        );
-        fileUuidRef.current = action.uuid;
+        // App owns the workspace: FilesScreen must never dispose it, because the
+        // same object is reused when a root modal unmounts the screen (power or
+        // exit confirmation) and when `f` is pressed twice on one instance.
+        // A fresh workspace per open also drops any half-connected session from
+        // the previous visit instead of reusing it.
+        setWorkspace((prev) => {
+          prev?.dispose();
+          return new FileWorkspace(client, action.uuid);
+        });
         setFileUuid(action.uuid);
+        // Throws on a corrupt queue dir; the files branch of requestAccess catches
+        // it and flashes, before the view switches.
         getQueue();
         setView("files");
-        if (signal) return;
+        if (signal) {
+          // The power modal already verified the instance is up; the old rejected
+          // gate must not keep gating the remote pane.
+          setFileGate(Promise.resolve());
+          return;
+        }
         // No abort wiring on this path: open the view first, verify power in the
         // background, and let the remote pane wait on the outcome.
         const gate = (async () => {
@@ -395,7 +432,11 @@ export function App({
           flash(err.message);
           noteAuthFailure(err);
         });
-        setFileGate(gate.then(() => undefined));
+        const safe = gate.then(() => undefined);
+        // The power modal unmounts FilesScreen, so nobody may be waiting on this
+        // branch yet: a rejection with no handler faults the process (Node 22).
+        safe.catch(() => undefined);
+        setFileGate(safe);
         return;
       }
       if (action.kind === "resume") {
@@ -428,7 +469,14 @@ export function App({
       // Everything else still gates here first.
       if (action.kind === "files") {
         if (busy) return;
-        await performAccess(action);
+        // getQueue throws on a corrupt queue dir; surface it like the `t` path
+        // does instead of faulting the promise nobody awaits.
+        try {
+          await performAccess(action);
+        } catch (err) {
+          flash((err as Error).message);
+          noteAuthFailure(err);
+        }
         return;
       }
       if (busy) return;
@@ -556,6 +604,9 @@ export function App({
         if (stock.length === 0) void loadStock();
         return;
       }
+      // Before the empty guard: a fresh account has no rows, and `n` is the only
+      // way out of the dashboard the empty state advertises.
+      if (input === "n") return setView("create");
       if (!row) return;
       if (key.return) {
         setReveal(false);
@@ -657,9 +708,18 @@ export function App({
         />
       ) : pending?.kind === "exit" ? (
         <Confirm
-          title="暂停传输并退出？"
-          detail="当前和排队任务将暂停，保留续传数据。下次打开传输队列后可手动恢复；退出后不会后台传输。"
-          confirmLabel="暂停并退出"
+          title={releasing.current ? "中止释放并退出？" : "暂停传输并退出？"}
+          detail={[
+            releasing.current
+              ? `实例 ${releasing.current.uuid} 已发出关机，正在等待关机完成后释放。退出会停止等待：实例会关机、不再计费，但不会被释放，之后可运行 autodl rm ${releasing.current.uuid}。`
+              : null,
+            queueRef.current?.hasPending()
+              ? "当前和排队任务将暂停，保留续传数据。下次打开传输队列后可手动恢复；退出后不会后台传输。"
+              : null,
+          ]
+            .filter(Boolean)
+            .join("\n")}
+          confirmLabel={releasing.current ? "中止并退出" : "暂停并退出"}
           onConfirm={() => void finishExit()}
           onCancel={() => setPending(null)}
         />
@@ -695,7 +755,13 @@ export function App({
             const target = pending.row;
             setPending(null);
             void act("释放", async () => {
-              await destroyInstance(client, target.instance.uuid);
+              const controller = new AbortController();
+              releasing.current = { uuid: target.instance.uuid, controller };
+              try {
+                await destroyInstance(client, target.instance.uuid, { signal: controller.signal });
+              } finally {
+                if (releasing.current?.controller === controller) releasing.current = null;
+              }
               return `✔ ${target.instance.uuid} 已释放`;
             });
           }}

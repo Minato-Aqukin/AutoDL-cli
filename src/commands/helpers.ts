@@ -125,3 +125,23 @@ export async function confirmDestructive(message: string, yes: boolean): Promise
   if (isCancel(answer)) return false;
   return answer === true;
 }
+
+/**
+ * Parse a numeric CLI flag into a finite number.
+ *
+ * A bare `Number()` turns typos like `20元` or `5%` into NaN, which then fails
+ * every comparison silently — the balance gate passes, the idle guard never fires.
+ * Reject such input up front as a usage error instead.
+ */
+export function parseNumericFlag(
+  raw: string,
+  flag: string,
+  { integer = false, min = 0 }: { integer?: boolean; min?: number } = {},
+): number {
+  const value = Number(raw);
+  const valid = Number.isFinite(value) && value >= min && (!integer || Number.isInteger(value));
+  if (!valid) {
+    throw new UsageError(`--${flag} 必须是${integer ? "整数" : "数字"}且 ≥ ${min}，收到 "${raw}"`);
+  }
+  return value;
+}

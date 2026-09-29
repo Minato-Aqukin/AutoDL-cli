@@ -22,6 +22,7 @@ import {
 } from "../core/endpoints/instance.js";
 import { UsageError } from "../core/errors.js";
 import { formatRate } from "../core/money.js";
+import { redactSnapshot } from "../core/schemas.js";
 import { chooseRegions } from "../core/stock.js";
 import { waitForRunning, waitForShutdown } from "../core/waiters.js";
 import { assertBudget } from "../guard/budget.js";
@@ -39,7 +40,7 @@ import {
   warn,
 } from "../output/format.js";
 import { t } from "../output/i18n.js";
-import { action, confirmDestructive } from "./helpers.js";
+import { action, confirmDestructive, parseNumericFlag } from "./helpers.js";
 
 interface CreateOptions {
   gpu: string;
@@ -102,13 +103,7 @@ export function registerInstanceCommands(program: Command): void {
 
         const payload = {
           instance,
-          snapshot:
-            snapshot && !options.showPassword
-              ? {
-                  ...snapshot,
-                  ssh: { ...snapshot.ssh, password: snapshot.ssh.password ? "***" : null },
-                }
-              : snapshot,
+          snapshot: snapshot && !options.showPassword ? redactSnapshot(snapshot) : snapshot,
         };
 
         emit(payload, () => {
@@ -222,7 +217,9 @@ export function registerInstanceCommands(program: Command): void {
 
         await assertBudget(
           context.client,
-          options.minBalance !== undefined ? Number(options.minBalance) : undefined,
+          options.minBalance !== undefined
+            ? parseNumericFlag(options.minBalance, "min-balance", { min: 0 })
+            : undefined,
         );
 
         const startCommand = composeStartCommand(ttlSeconds, options.startCommand);
@@ -233,10 +230,10 @@ export function registerInstanceCommands(program: Command): void {
         try {
           uuid = await createInstance(context.client, {
             gpuSpec: spec.id,
-            gpuNum: Number(options.num),
+            gpuNum: parseNumericFlag(options.num, "num", { integer: true, min: 1 }),
             imageUuid,
             cudaFrom,
-            expandSystemDiskGb: Number(options.disk),
+            expandSystemDiskGb: parseNumericFlag(options.disk, "disk", { integer: true, min: 0 }),
             ...(regions.length ? { regions } : {}),
             ...(options.name ? { name: options.name } : {}),
             ...(startCommand ? { startCommand } : {}),
@@ -256,11 +253,17 @@ export function registerInstanceCommands(program: Command): void {
           });
         }
 
+        const gpuNum = parseNumericFlag(options.num, "num", { integer: true, min: 1 });
         let status = "creating";
         if (options.wait) {
           const waitSpin = isJson() ? null : spinner();
           waitSpin?.start(t("instance.waiting"));
-          status = await waitForRunning(context.client, uuid);
+          try {
+            status = await waitForRunning(context.client, uuid);
+          } catch (err) {
+            waitSpin?.stop(t("instance.waitFailed"), 1);
+            throw err;
+          }
           waitSpin?.stop(t("instance.ready"));
         }
 
@@ -268,7 +271,7 @@ export function registerInstanceCommands(program: Command): void {
           {
             uuid,
             gpuSpec: spec.id,
-            gpuNum: Number(options.num),
+            gpuNum,
             imageUuid,
             cudaFrom,
             regions,
@@ -310,7 +313,12 @@ export function registerInstanceCommands(program: Command): void {
           if (options.wait || ttlSeconds) {
             const spin = isJson() ? null : spinner();
             spin?.start(t("instance.waiting"));
-            await waitForRunning(context.client, id);
+            try {
+              await waitForRunning(context.client, id);
+            } catch (err) {
+              spin?.stop(t("instance.waitFailed"), 1);
+              throw err;
+            }
             spin?.stop(t("instance.ready"));
 
             if (ttlSeconds) {
@@ -369,6 +377,18 @@ export function registerInstanceCommands(program: Command): void {
     .action(
       action(async (context, id: string, options: { yes: boolean; force: boolean }) => {
         const status = await getInstanceStatus(context.client, id);
+        // Confirm first: with --force the old order powered the instance off and
+        // waited up to 10 minutes before asking, so declining (or a --json USAGE
+        // refusal) still left a running job shut down.
+        const confirmed = await confirmDestructive(
+          `${t("instance.confirmRelease")} ${id}`,
+          options.yes,
+        );
+        if (!confirmed) {
+          emit({ uuid: id, released: false, cancelled: true }, () => note(t("common.cancelled")));
+          return 0;
+        }
+
         if (status !== "shutdown") {
           if (!options.force) {
             throw new UsageError(`实例当前状态为 "${status}"，AutoDL 要求先关机才能释放`, {
@@ -383,15 +403,6 @@ export function registerInstanceCommands(program: Command): void {
           }
           // AutoDL also refuses a release until the shutdown has finished.
           await waitForShutdown(context.client, id, { timeoutMs: 10 * 60_000 });
-        }
-
-        const confirmed = await confirmDestructive(
-          `${t("instance.confirmRelease")} ${id}`,
-          options.yes,
-        );
-        if (!confirmed) {
-          emit({ uuid: id, released: false, cancelled: true }, () => note(t("common.cancelled")));
-          return 0;
         }
 
         await releaseInstance(context.client, id);

@@ -158,8 +158,8 @@ type BrowserMode =
   | { name: "none" }
   | { name: "pathNav" }
   | { name: "mkdir" }
-  | { name: "rename"; multi: boolean }
-  | { name: "delete" }
+  | { name: "rename"; multi: boolean; targets: FileEntry[] }
+  | { name: "delete"; targets: FileEntry[] }
   | { name: "transfer" }
   | { name: "pathTransfer"; field: number };
 
@@ -547,8 +547,15 @@ function handleQueueInput(
       ui.flash("队列为空");
       return true;
     }
-    if (job.state === "paused" || job.state === "cancelled") ui.resume(job.request.id);
-    else ui.flash("只有已暂停/已取消的任务可以恢复");
+    if (job.state === "paused" || job.state === "cancelled") {
+      // resume → TransferQueue.resume → claimOwnership can throw when another
+      // process owns the queue; Ink would let that escape and kill the TUI.
+      try {
+        ui.resume(job.request.id);
+      } catch (err) {
+        ui.flash((err as Error).message);
+      }
+    } else ui.flash("只有已暂停/已取消的任务可以恢复");
     return true;
   }
   if (input === "c") {
@@ -562,7 +569,11 @@ function handleQueueInput(
       job.state === "paused" ||
       job.state === "conflict"
     ) {
-      queue.cancel(job.request.id);
+      try {
+        queue.cancel(job.request.id);
+      } catch (err) {
+        ui.flash((err as Error).message);
+      }
     } else ui.flash("已完成/已取消的任务无需取消");
     return true;
   }
@@ -571,10 +582,15 @@ function handleQueueInput(
     return true;
   }
   if ((input === "o" || input === "s" || input === "b") && job && job.state === "conflict") {
-    queue.resolveConflict(job.request.id, {
-      choice: input === "o" ? "overwrite" : input === "s" ? "skip" : "keep-both",
-      applyToAll: ui.applyAll,
-    });
+    // resolveConflict throws when the conflict was already settled elsewhere.
+    try {
+      queue.resolveConflict(job.request.id, {
+        choice: input === "o" ? "overwrite" : input === "s" ? "skip" : "keep-both",
+        applyToAll: ui.applyAll,
+      });
+    } catch (err) {
+      ui.flash((err as Error).message);
+    }
     return true;
   }
   return false;
@@ -730,12 +746,14 @@ export function FilesScreen({
   );
 
   const mounted = useRef(true);
+  // Never dispose the workspace here: App owns it and reuses the same object
+  // across remounts (root modals unmount this screen) and across `f` presses on
+  // one instance. Disposing would poison the next mount with 文件会话已关闭.
   useEffect(
     () => () => {
       mounted.current = false;
-      workspace.dispose();
     },
-    [workspace],
+    [],
   );
   const gen = useRef<{ local: number; remote: number }>({ local: 0, remote: 0 });
   const queueJobId = jobs[Math.min(queueCursor, Math.max(0, jobs.length - 1))]?.request.id;
@@ -823,6 +841,9 @@ export function FilesScreen({
     new Set(jobs.filter((job) => job.state === "completed").map((job) => job.request.id)),
   );
   useEffect(() => {
+    // A dialog freezes its targets at open; a reload would reset cursor/checked
+    // and repaint the frozen dialog's title, so completions wait until it closes.
+    if (mode.name !== "none") return;
     for (const job of jobs) {
       if (job.state !== "completed" || completedJobs.current.has(job.request.id)) continue;
       completedJobs.current.add(job.request.id);
@@ -830,17 +851,22 @@ export function FilesScreen({
       const side = job.request.direction === "upload" ? "remote" : "local";
       loadPane(side, pathRef.current[side]);
     }
-  }, [jobs, loadPane, uuid]);
+  }, [jobs, loadPane, uuid, mode.name]);
 
   const pane = panes[activeSide];
   const otherSide: FileSide = activeSide === "local" ? "remote" : "local";
   const cursorIndex = Math.min(pane.cursor, Math.max(0, pane.entries.length - 1));
   const cursorEntry = pane.entries[cursorIndex];
 
+  // A Set keeps both the selection and the per-row render O(entries + checked):
+  // `checked.includes` per entry is quadratic once `a` selects a large directory.
+  const checkedSet = useMemo(() => new Set(pane.checked), [pane.checked]);
+  const cursorPath = cursorEntry?.path;
   const selection = useMemo((): FileEntry[] => {
-    if (pane.checked.length > 0) return pane.entries.filter((e) => pane.checked.includes(e.path));
-    return cursorEntry ? [cursorEntry] : [];
-  }, [pane.checked, pane.entries, cursorEntry]);
+    if (checkedSet.size > 0) return pane.entries.filter((e) => checkedSet.has(e.path));
+    const current = pane.entries.find((e) => e.path === cursorPath);
+    return current ? [current] : [];
+  }, [checkedSet, pane.entries, cursorPath]);
 
   const setPaneCursor = useCallback((side: FileSide, fn: (v: number) => number) => {
     setPanes((prev) => {
@@ -870,22 +896,25 @@ export function FilesScreen({
     [flash, loadPane],
   );
 
-  const doDelete = useCallback(() => {
-    const targets = selection.map((e) => e.path);
-    const side = activeSide;
-    const count = targets.length;
-    setMode({ name: "none" });
-    setConfirmYes(false);
-    void runOp(
-      `已删除 ${count} 项`,
-      async () => {
-        const results = await Promise.allSettled(targets.map((t) => workspace.remove(side, t)));
-        const failed = results.filter((r) => r.status === "rejected");
-        if (failed.length > 0) throw new Error(`${failed.length}/${count} 项删除失败`);
-      },
-      side,
-    );
-  }, [selection, activeSide, runOp, workspace]);
+  const doDelete = useCallback(
+    (targets: FileEntry[]) => {
+      const paths = targets.map((e) => e.path);
+      const side = activeSide;
+      const count = paths.length;
+      setMode({ name: "none" });
+      setConfirmYes(false);
+      void runOp(
+        `已删除 ${count} 项`,
+        async () => {
+          const results = await Promise.allSettled(paths.map((t) => workspace.remove(side, t)));
+          const failed = results.filter((r) => r.status === "rejected");
+          if (failed.length > 0) throw new Error(`${failed.length}/${count} 项删除失败`);
+        },
+        side,
+      );
+    },
+    [activeSide, runOp, workspace],
+  );
 
   const openTransferConfirm = useCallback(() => {
     if (selection.length === 0) {
@@ -904,14 +933,21 @@ export function FilesScreen({
   const submitTransfer = useCallback(
     (sync: boolean, checksum: boolean) => {
       if (!pending) return;
-      queue.enqueue({
-        uuid,
-        direction: pending.direction,
-        sources: pending.sources,
-        destination: pending.destDir,
-        sync,
-        checksum,
-      });
+      // enqueue throws on lock contention, persistence or validation failures;
+      // Ink would let that escape the key handler and kill the whole TUI.
+      try {
+        queue.enqueue({
+          uuid,
+          direction: pending.direction,
+          sources: pending.sources,
+          destination: pending.destDir,
+          sync,
+          checksum,
+        });
+      } catch (err) {
+        flash((err as Error).message);
+        return;
+      }
       flash(`✔ 已加入队列：${pending.sources.length} 项，按 Q 查看`);
       setPending(null);
       setMode({ name: "none" });
@@ -934,14 +970,19 @@ export function FilesScreen({
     const toSide: FileSide = direction === "upload" ? "remote" : "local";
     const source = resolveSide(fromSide, panes[fromSide].path, rawSource);
     const dest = resolveSide(toSide, panes[toSide].path, rawDest);
-    queue.enqueue({
-      uuid,
-      direction,
-      sources: [source],
-      destination: dest,
-      sync: pathForm.sync,
-      checksum: pathForm.checksum,
-    });
+    try {
+      queue.enqueue({
+        uuid,
+        direction,
+        sources: [source],
+        destination: dest,
+        sync: pathForm.sync,
+        checksum: pathForm.checksum,
+      });
+    } catch (err) {
+      flash((err as Error).message);
+      return;
+    }
     flash("✔ 已加入队列，按 Q 查看");
     setMode({ name: "none" });
   }, [pathForm, panes, queue, uuid, flash]);
@@ -1029,7 +1070,7 @@ export function FilesScreen({
             flash("目标路径不能为空");
             return;
           }
-          const targets = selection;
+          const targets = mode.targets;
           setMode({ name: "none" });
           if (mode.multi) {
             const destDir = resolveSide(activeSide, pane.path, value);
@@ -1152,7 +1193,7 @@ export function FilesScreen({
           setMode({ name: "none" });
           return;
         }
-        doDelete();
+        doDelete(mode.targets);
         return;
       }
       if (key.escape || input === "q" || input === "n") {
@@ -1161,7 +1202,7 @@ export function FilesScreen({
         return;
       }
       if (input === "y") {
-        doDelete();
+        doDelete(mode.targets);
         return;
       }
       return;
@@ -1240,7 +1281,9 @@ export function FilesScreen({
     if (input === "r" && cursorEntry) {
       const multi = selection.length > 1;
       setField(multi ? pane.path : cursorEntry.path);
-      setMode({ name: "rename", multi });
+      // Frozen now: a transfer finishing behind the dialog resets the pane
+      // (cursor 0, unchecked), which must not retarget the pending rename.
+      setMode({ name: "rename", multi, targets: selection });
       return;
     }
     if (input === "g") {
@@ -1259,7 +1302,9 @@ export function FilesScreen({
         return;
       }
       setConfirmYes(false);
-      setMode({ name: "delete" });
+      // Frozen now: a transfer finishing behind the dialog resets the pane
+      // (cursor 0, unchecked), which must not retarget the pending delete.
+      setMode({ name: "delete", targets: selection });
       return;
     }
     if (input === "u") {
@@ -1311,11 +1356,25 @@ export function FilesScreen({
         : mode.name === "transfer"
           ? ["Enter/y 加入队列 · s 同步 · c 校验 · Esc/q 取消"]
           : ["输入路径 · ⌫ 删除 · Enter 确定 · Esc 取消"];
-  const dialogH = dialogRows(mode, selection.length);
+  // Dialogs render their frozen targets, never the live selection: with the
+  // reload above skipped the two would usually agree, but a navigation that
+  // landed between open and render must not change what Enter deletes.
+  const dialogTargets: FileEntry[] =
+    mode.name === "delete" || mode.name === "rename" ? mode.targets : selection;
+  const dialogH = dialogRows(mode, dialogTargets.length);
   const hintCount = hintLines.length;
   // Title (1) + pane header (1) + entries + pane footer (1) + dialog + notice + hints.
   const listRows = Math.max(1, height - 3 - dialogH - (notice ? 1 : 0) - hintCount);
 
+  // Per-side Sets mirror checkedSet above so the visible-rows render stays
+  // O(rows) instead of O(rows × checked) on every transfer-tick re-render.
+  const checkedBySide = useMemo(
+    () => ({
+      local: new Set(panes.local.checked),
+      remote: new Set(panes.remote.checked),
+    }),
+    [panes.local.checked, panes.remote.checked],
+  );
   const renderPane = (side: FileSide, paneWidth: number): React.ReactElement => {
     const p = panes[side];
     const activePane = side === activeSide && !(narrow && side !== activeSide);
@@ -1324,6 +1383,7 @@ export function FilesScreen({
     const nameWidth = Math.max(8, paneWidth - 14);
     const start = Math.max(0, Math.min(idx, Math.max(0, p.entries.length - listRows)));
     const shown = p.entries.slice(start, start + listRows);
+    const checked = checkedBySide[side];
     return (
       <Box flexDirection="column" width={paneWidth} flexShrink={0}>
         <Box paddingX={1}>
@@ -1348,8 +1408,8 @@ export function FilesScreen({
           shown.map((entry, i) => {
             const absolute = start + i;
             const isCursor = side === activeSide && absolute === idx;
-            const checked = p.checked.includes(entry.path);
-            const label = `${checked ? "[✓]" : "[ ]"}${isCursor ? "›" : " "}${visible(entry.name)}${kindMark(entry.kind)}`;
+            const isChecked = checked.has(entry.path);
+            const label = `${isChecked ? "[✓]" : "[ ]"}${isCursor ? "›" : " "}${visible(entry.name)}${kindMark(entry.kind)}`;
             return (
               <Box key={entry.path}>
                 <Text>
@@ -1404,7 +1464,7 @@ export function FilesScreen({
       return (
         <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor="cyan">
           <Text>
-            {mode.multi ? `移动 ${selection.length} 项到目录：` : "改名/移动为："}
+            {mode.multi ? `移动 ${dialogTargets.length} 项到目录：` : "改名/移动为："}
             {clip(visible(field), inner - 8)}
             <Text dimColor>█</Text>
           </Text>
@@ -1416,14 +1476,16 @@ export function FilesScreen({
       return (
         <Box flexDirection="column" paddingX={1} borderStyle="round" borderColor="red">
           <Text bold color="red">
-            永久删除 {selection.length} 项（递归，不可恢复）：
+            永久删除 {dialogTargets.length} 项（递归，不可恢复）：
           </Text>
-          {selection.slice(0, 3).map((e) => (
+          {dialogTargets.slice(0, 3).map((e) => (
             <Text key={e.path} dimColor>
               · {clip(visible(e.path), inner - 4)}
             </Text>
           ))}
-          {selection.length > 3 ? <Text dimColor>· …另 {selection.length - 3} 项</Text> : null}
+          {dialogTargets.length > 3 ? (
+            <Text dimColor>· …另 {dialogTargets.length - 3} 项</Text>
+          ) : null}
           <Box>
             <Text inverse={!confirmYes}> 取消 </Text>
             <Text> </Text>

@@ -58,3 +58,109 @@ describe("remote command assembly", () => {
     expect(assembled.indexOf("cd ")).toBeLessThan(assembled.indexOf("python train.py"));
   });
 });
+
+describe("remote command quoting and lifecycle", () => {
+  it("single-quotes env values so `$` and backticks survive literally", async () => {
+    expect(
+      await assemble("echo hi", { env: { HF_TOKEN: "hf_ab`id`" }, loginShell: false }),
+    ).toContain("export HF_TOKEN='hf_ab`id`'");
+  });
+
+  it("single-quotes cwd instead of double-quoting it", async () => {
+    expect(await assemble("pwd", { cwd: "/root/my proj", loginShell: false })).toContain(
+      "cd '/root/my proj'",
+    );
+  });
+
+  it("rejects hostile env keys", () => {
+    expect(() =>
+      execOnConnection(fakeConnection({}), "echo hi", { env: { "A;touch /tmp/x;B": "v" } }),
+    ).toThrow(/非法的环境变量名/);
+  });
+
+  it("reassembles utf8 split across chunks", async () => {
+    const text = "训练完成：准确率 99%\n";
+    const buf = Buffer.from(text, "utf8");
+    const conn = {
+      exec(_command: string, _opts: unknown, cb: (err: Error | null, stream: unknown) => void) {
+        const stream = new EventEmitter() as EventEmitter & { stderr: EventEmitter };
+        stream.stderr = new EventEmitter();
+        cb(null, stream);
+        queueMicrotask(() => {
+          stream.emit("data", buf.subarray(0, 4));
+          stream.emit("data", buf.subarray(4));
+          stream.emit("exit", 0);
+          stream.emit("close", 0, null);
+        });
+      },
+    } as never;
+    const result = await execOnConnection(conn, "echo", { capture: true });
+    expect(result.stdout).toBe(text);
+  });
+
+  it("rejects a close that arrived without an exit as a disconnect", async () => {
+    const conn = {
+      exec(_command: string, _opts: unknown, cb: (err: Error | null, stream: unknown) => void) {
+        const stream = new EventEmitter() as EventEmitter & { stderr: EventEmitter };
+        stream.stderr = new EventEmitter();
+        cb(null, stream);
+        queueMicrotask(() => {
+          stream.emit("data", Buffer.from("partial"));
+          stream.emit("close", undefined, undefined);
+        });
+      },
+    } as never;
+    await expect(execOnConnection(conn, "python train.py")).rejects.toThrow(/意外断开/);
+  });
+
+  it("resolves when exit precedes close", async () => {
+    const conn = {
+      exec(_command: string, _opts: unknown, cb: (err: Error | null, stream: unknown) => void) {
+        const stream = new EventEmitter() as EventEmitter & { stderr: EventEmitter };
+        stream.stderr = new EventEmitter();
+        cb(null, stream);
+        queueMicrotask(() => {
+          stream.emit("exit", 3);
+          stream.emit("close", 3, null);
+        });
+      },
+    } as never;
+    const result = await execOnConnection(conn, "exit 3");
+    expect(result.exitCode).toBe(3);
+  });
+
+  it("rejects immediately when already aborted", () => {
+    const controller = new AbortController();
+    controller.abort();
+    expect(() =>
+      execOnConnection(fakeConnection({}), "sleep 99", { signal: controller.signal }),
+    ).toThrow(/操作已取消/);
+  });
+
+  it("signals and closes the remote on mid-run abort", async () => {
+    const signals: string[] = [];
+    let closed = false;
+    const conn = {
+      exec(_command: string, _opts: unknown, cb: (err: Error | null, stream: unknown) => void) {
+        const stream = new EventEmitter() as EventEmitter & {
+          stderr: EventEmitter;
+          close: () => void;
+          signal: (n: string) => void;
+        };
+        stream.stderr = new EventEmitter();
+        stream.close = () => {
+          closed = true;
+        };
+        stream.signal = (n: string) => {
+          signals.push(n);
+        };
+        cb(null, stream);
+      },
+    } as never;
+    const controller = new AbortController();
+    const pending = execOnConnection(conn, "sleep 99", { signal: controller.signal });
+    controller.abort();
+    await expect(pending).rejects.toThrow(/操作已取消/);
+    expect(closed || signals.includes("KILL")).toBe(true);
+  });
+});

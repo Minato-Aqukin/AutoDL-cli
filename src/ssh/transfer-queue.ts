@@ -50,7 +50,7 @@ import type { TransferJob, TransferQueueView } from "./queue-types.js";
  *   auto-start option.
  */
 
-const RECORD_VERSION = 1;
+const RECORD_VERSION = 2;
 const MAX_ATTEMPTS = 3;
 /** Real, abortable delays between transport retries (indexed by failed attempt). */
 const RETRY_DELAYS_MS = [2_000, 5_000];
@@ -85,7 +85,7 @@ const FileTransferRequestSchema = z.object({
 const EnqueueRequestSchema = FileTransferRequestSchema.omit({ id: true });
 
 const PersistedJobSchema = z.object({
-  version: z.literal(1),
+  version: z.union([z.literal(1), z.literal(2)]),
   id: jobIdSchema,
   enqueuedAt: z.number(),
   updatedAt: z.number(),
@@ -102,6 +102,17 @@ const PersistedJobSchema = z.object({
   result: z
     .object({ files: z.number(), bytes: z.number(), skipped: z.array(z.string()) })
     .optional(),
+  conflict: z
+    .object({
+      source: z.string(),
+      destination: z.string(),
+      sourceSize: z.number(),
+      destinationSize: z.number(),
+    })
+    .optional(),
+  resolution: z
+    .object({ choice: z.enum(["overwrite", "skip", "keep-both"]), applyToAll: z.boolean() })
+    .optional(),
 });
 
 type PersistedJob = z.infer<typeof PersistedJobSchema>;
@@ -113,6 +124,7 @@ interface RuntimeJob {
   conflict?: FileConflict;
   result?: TransferJob["result"];
   error?: string;
+  resolution?: FileConflictResolution;
   enqueuedAt: number;
   abort?: AbortController;
   cancelRequested: boolean;
@@ -134,6 +146,19 @@ class QueueAbortError extends Error {
 }
 
 function validateStoredRecord(raw: unknown, filename: string): PersistedJob {
+  // Records written before applyToAll was persisted store `resolution` as a
+  // bare choice string; normalize to the object form before schema parsing.
+  if (
+    typeof raw === "object" &&
+    raw !== null &&
+    "resolution" in raw &&
+    typeof raw.resolution === "string"
+  ) {
+    (raw as { resolution: unknown }).resolution = {
+      choice: raw.resolution,
+      applyToAll: false,
+    };
+  }
   const parsed = PersistedJobSchema.safeParse(raw);
   if (!parsed.success) {
     const detail = parsed.error.issues[0]?.message ?? "格式非法";
@@ -438,7 +463,7 @@ export class TransferQueue implements TransferQueueView {
 
   resume(id: string): void {
     this.assertUsable();
-    const job = this.require(id);
+    const job = this.jobOrThrow(id);
     if (job.state !== "paused" && job.state !== "cancelled") return;
     try {
       this.validateStored(job);
@@ -467,7 +492,7 @@ export class TransferQueue implements TransferQueueView {
 
   cancel(id: string): void {
     this.assertUsable();
-    const job = this.require(id);
+    const job = this.jobOrThrow(id);
     if (job.state === "completed" || job.state === "cancelled") return;
     this.claimOwnership();
     if (job.state === "running" || job.state === "conflict") {
@@ -492,10 +517,9 @@ export class TransferQueue implements TransferQueueView {
     }
     this.emit();
   }
-
   resolveConflict(id: string, resolution: FileConflictResolution): void {
     this.assertUsable();
-    const job = this.require(id);
+    const job = this.jobOrThrow(id);
     if (
       !resolution ||
       (resolution.choice !== "overwrite" &&
@@ -505,12 +529,34 @@ export class TransferQueue implements TransferQueueView {
       throw new Error(`任务 ${id}：冲突处理选项非法`);
     }
     const pending = this.conflicts.get(id);
-    if (!pending || job.state !== "conflict") {
+    if (pending && job.state === "conflict") {
+      // Live conflict in this process: answer it directly.
+      this.claimOwnership();
+      pending.resolve({ choice: resolution.choice, applyToAll: resolution.applyToAll === true });
+      return;
+    }
+    // Cross-process answer: the waiting run loop lives elsewhere (or the job
+    // is parked paused by an earlier dispose). Persist the choice so the next
+    // resume applies it via the checkpoint; then wake the job if it's ours.
+    if (job.state !== "conflict" && job.state !== "paused") {
       throw new Error(`任务 ${id} 当前没有待处理的冲突`);
     }
-    // Claim only for a live conflict we actually own; no-op calls stay lock-free.
     this.claimOwnership();
-    pending.resolve({ choice: resolution.choice, applyToAll: resolution.applyToAll === true });
+    const stored: FileConflictResolution = {
+      choice: resolution.choice,
+      applyToAll: resolution.applyToAll === true,
+    };
+    job.resolution = stored;
+    job.conflict = undefined;
+    if (job.state === "conflict") job.state = "paused";
+    try {
+      this.save(job);
+    } catch (err) {
+      job.resolution = undefined;
+      this.emit();
+      throw err;
+    }
+    if (job.state === "paused") this.resume(id);
   }
 
   hasPending(): boolean {
@@ -573,7 +619,7 @@ export class TransferQueue implements TransferQueueView {
     if (this.disposed) throw new Error("传输队列已释放");
   }
 
-  private require(id: string): RuntimeJob {
+  private jobOrThrow(id: string): RuntimeJob {
     // Ids are randomUUIDs by schema, so they can never escape the record dir
     // via save()/validateStored() path joins. Reject anything else up front.
     if (!JOB_ID_PATTERN.test(id)) throw new Error(`未知传输任务：${id}`);
@@ -682,6 +728,14 @@ export class TransferQueue implements TransferQueueView {
               this.noteProgress();
             },
             onConflict: (conflict: FileConflict): Promise<FileConflictResolution> => {
+              // A cross-process `resolve` stored the answer before this run
+              // started (or while we were away): apply without prompting,
+              // keeping the stored applyToAll so `--all` survives the trip.
+              if (job.resolution) {
+                const stored = job.resolution;
+                job.resolution = undefined;
+                return Promise.resolve({ ...stored });
+              }
               job.state = "conflict";
               job.conflict = { ...conflict };
               try {
@@ -797,13 +851,17 @@ export class TransferQueue implements TransferQueueView {
       const rec = validateStoredRecord(raw, file);
       loaded.push({
         request: rec.request,
-        // Unfinished work always resumes paused; nothing autostarts.
+        // Unfinished work always resumes paused; nothing autostarts. A
+        // persisted conflict detail and resolution survive the trip so a
+        // fresh process can show and answer them.
         state:
           rec.state === "completed" || rec.state === "cancelled" || rec.state === "paused"
             ? rec.state
             : "paused",
         result: rec.result,
         error: rec.error,
+        ...(rec.conflict ? { conflict: { ...rec.conflict } } : {}),
+        ...(rec.resolution ? { resolution: { ...rec.resolution } } : {}),
         enqueuedAt: rec.enqueuedAt,
         cancelRequested: false,
         lastEmitAt: 0,
@@ -823,6 +881,8 @@ export class TransferQueue implements TransferQueueView {
       state: job.state,
       ...(job.error !== undefined ? { error: job.error } : {}),
       ...(job.result ? { result: job.result } : {}),
+      ...(job.conflict ? { conflict: { ...job.conflict } } : {}),
+      ...(job.resolution ? { resolution: { ...job.resolution } } : {}),
     };
   }
 

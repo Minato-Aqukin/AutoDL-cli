@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listTracked } from "../config/state.js";
+import { listTracked, type TrackedInstance, untrackInstance } from "../config/state.js";
 import type { AutoDLClient } from "../core/client.js";
 import {
   getInstanceSnapshot,
@@ -13,6 +13,7 @@ import { isAuthError } from "../core/errors.js";
 import { estimateCost } from "../core/money.js";
 import type { Instance, InstanceSnapshot } from "../core/schemas.js";
 import { waitForShutdown } from "../core/waiters.js";
+import { assertNotAborted } from "../ssh/credentials.js";
 
 /**
  * The only place in the TUI that touches the API.
@@ -54,11 +55,15 @@ export function buildRow(
   instance: Instance,
   snapshot: InstanceSnapshot | undefined,
   now: number,
+  tracked?: Pick<TrackedInstance, "uuid" | "expiresAt" | "ttlSeconds"> | null,
 ): DashboardRow {
   const uptimeSeconds =
     instance.status === "running" ? secondsSince(instance.startedAt, now) : null;
   const price = snapshot?.priceYuanPerHour ?? null;
-  const tracked = listTracked().find((entry) => entry.uuid === instance.uuid);
+  // The ledger entry is passed in so one rows computation reads the ledger once;
+  // the fallback keeps direct callers (and old tests) working.
+  const entry =
+    tracked === undefined ? listTracked().find((e) => e.uuid === instance.uuid) : tracked;
 
   return {
     instance,
@@ -66,8 +71,8 @@ export function buildRow(
     priceYuanPerHour: price && price > 0 ? price : null,
     estimatedCostYuan:
       uptimeSeconds !== null && price && price > 0 ? estimateCost(price, uptimeSeconds) : null,
-    ttlRemainingMs: tracked ? tracked.expiresAt - now : null,
-    ttlSeconds: tracked?.ttlSeconds ?? null,
+    ttlRemainingMs: entry ? entry.expiresAt - now : null,
+    ttlSeconds: entry?.ttlSeconds ?? null,
   };
 }
 
@@ -259,7 +264,14 @@ export function useInstances(
     freshEntry(instance)?.snapshot;
 
   const now = Date.now();
-  const rows = instances.map((instance) => buildRow(instance, freshSnapshot(instance), now));
+  // One synchronous ledger read per rows computation, not one per instance:
+  // buildRow itself still reads on demand for direct callers. Plain code, not a
+  // memo: re-reading on every render is the point (a stop/release elsewhere in
+  // the session changes the file), and N=instances is already paid below.
+  const trackedByUuid = new Map(listTracked().map((entry) => [entry.uuid, entry]));
+  const rows = instances.map((instance) =>
+    buildRow(instance, freshSnapshot(instance), now, trackedByUuid.get(instance.uuid) ?? null),
+  );
 
   return {
     rows,
@@ -293,19 +305,36 @@ export async function stopInstance(
 ): Promise<{ stopped: boolean; status: string }> {
   await powerOffInstance(client, uuid);
   const status = await getInstanceStatus(client, uuid).catch(() => "unknown");
-  return { stopped: status !== "running" && status !== "starting", status };
+  const stopped = status !== "running" && status !== "starting";
+  // Same as `autodl stop`: once the meter has verifiably stopped there is nothing
+  // left for sweepExpired to guard, and a stale entry would power the instance off
+  // again after a later `s` start that armed nothing.
+  if (stopped) untrackInstance(uuid);
+  return { stopped, status };
 }
 
 export async function startInstance(client: AutoDLClient, uuid: string): Promise<void> {
   await powerOnInstance(client, uuid);
 }
 
-/** Release, waiting out the shutdown AutoDL requires before it will accept the call. */
-export async function destroyInstance(client: AutoDLClient, uuid: string): Promise<void> {
+/**
+ * Release, waiting out the shutdown AutoDL requires before it will accept the call.
+ *
+ * `signal` only cuts the wait short (quitting the dashboard mid-release): the
+ * power_off already sent still takes effect, and nothing is released after an abort.
+ */
+export async function destroyInstance(
+  client: AutoDLClient,
+  uuid: string,
+  { signal }: { signal?: AbortSignal } = {},
+): Promise<void> {
   const status = await getInstanceStatus(client, uuid).catch(() => "unknown");
   if (status !== "shutdown") {
     if (status !== "shutting_down") await powerOffInstance(client, uuid);
-    await waitForShutdown(client, uuid, { timeoutMs: 10 * 60_000 });
+    await waitForShutdown(client, uuid, { timeoutMs: 10 * 60_000, ...(signal ? { signal } : {}) });
   }
+  assertNotAborted(signal);
   await releaseInstance(client, uuid);
+  // Same as `autodl release`: a released uuid must not linger in the ledger.
+  untrackInstance(uuid);
 }

@@ -1,8 +1,9 @@
 import type { Writable } from "node:stream";
-import type { Client } from "ssh2";
+import { StringDecoder } from "node:string_decoder";
+import type { Client, ClientChannel } from "ssh2";
 import type { AutoDLClient } from "../core/client.js";
-import { SSHError, TimeoutError } from "../core/errors.js";
-import { type ConnectOptions, shellQuote, withSSH } from "./credentials.js";
+import { AutoDLError, SSHError, TimeoutError } from "../core/errors.js";
+import { assertNotAborted, type ConnectOptions, shellQuote, withSSH } from "./credentials.js";
 
 export interface ExecResult {
   /** Remote process exit code. `null` when the process was killed by a signal. */
@@ -41,9 +42,14 @@ export interface ExecOptions extends ConnectOptions {
 function buildCommand(command: string, options: ExecOptions): string {
   const parts: string[] = [];
   for (const [key, value] of Object.entries(options.env ?? {})) {
-    parts.push(`export ${key}=${JSON.stringify(value)}`);
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new SSHError(`非法的环境变量名：${key}`, {
+        hint: "变量名须以字母或下划线开头，仅含字母、数字和下划线。",
+      });
+    }
+    parts.push(`export ${key}=${shellQuote(value)}`);
   }
-  if (options.cwd) parts.push(`cd ${JSON.stringify(options.cwd)}`);
+  if (options.cwd) parts.push(`cd ${shellQuote(options.cwd)}`);
   parts.push(command);
   const inner = parts.join(" && ");
 
@@ -57,47 +63,123 @@ export function execOnConnection(
   options: ExecOptions = {},
 ): Promise<ExecResult> {
   const capture = options.capture ?? true;
+  const signal = options.signal;
+  assertNotAborted(signal);
   const full = buildCommand(command, options);
-
   return new Promise((resolve, reject) => {
-    conn.exec(full, { pty: options.pty ?? false }, (err, stream) => {
+    let openFailed = (err: Error): void => {
+      reject(new SSHError(`远程命令启动失败：${err.message}`, { cause: err }));
+    };
+    const onAbortBeforeOpen = (): void => {
+      // conn.exec is already in flight or about to run: swap the opener error
+      // for cancellation so a late channel is closed, never awaited.
+      openFailed = (err: Error) => {
+        reject(err);
+      };
+    };
+    // `assertNotAborted` above already handled the already-aborted case; the
+    // listener below swaps the opener error for cancellation if abort lands
+    // while conn.exec is in flight.
+    signal?.addEventListener("abort", onAbortBeforeOpen, { once: true });
+    conn.exec(full, { pty: options.pty ?? false }, (err, stream: ClientChannel) => {
+      signal?.removeEventListener("abort", onAbortBeforeOpen);
       if (err) {
-        reject(new SSHError(`远程命令启动失败：${err.message}`, { cause: err }));
+        openFailed(err);
+        return;
+      }
+      if (signal?.aborted) {
+        try {
+          stream.close();
+        } catch {
+          // Already gone.
+        }
+        reject(new AutoDLError("操作已取消"));
         return;
       }
 
+      const outDecoder = new StringDecoder("utf8");
+      const errDecoder = new StringDecoder("utf8");
       let stdout = "";
       let stderr = "";
       let settled = false;
+      let gotExit = false;
+      const finish = (fn: () => void): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        fn();
+      };
+      const kill = (): void => {
+        try {
+          stream.signal("KILL");
+        } catch {
+          // Not all servers accept signals; close() below still releases us.
+        }
+        try {
+          stream.close();
+        } catch {
+          // Already gone.
+        }
+      };
       const timer = options.timeoutMs
         ? setTimeout(() => {
-            settled = true;
-            stream.close();
-            reject(
-              new TimeoutError(`远程命令超过 ${options.timeoutMs}ms 未结束，已终止`, {
-                details: { command },
-              }),
+            kill();
+            finish(() =>
+              reject(
+                new TimeoutError(`远程命令超过 ${options.timeoutMs}ms 未结束，已终止`, {
+                  details: { command },
+                }),
+              ),
             );
           }, options.timeoutMs)
         : undefined;
+      // AbortSignal.timeout() also unrefs its timer; keep ours referenced so a
+      // long remote command can't let the process exit early.
+      timer?.ref?.();
+      const onAbort = (): void => {
+        kill();
+        finish(() => reject(new AutoDLError("操作已取消")));
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       stream.on("data", (chunk: Buffer) => {
-        if (capture) stdout += chunk.toString("utf8");
+        if (capture) stdout += outDecoder.write(chunk);
         options.stdout?.write(chunk);
       });
       stream.stderr.on("data", (chunk: Buffer) => {
-        if (capture) stderr += chunk.toString("utf8");
+        if (capture) stderr += errDecoder.write(chunk);
         options.stderr?.write(chunk);
       });
-      stream.on("close", (code: number | null, signal: string | null) => {
-        if (timer) clearTimeout(timer);
-        if (settled) return;
-        resolve({ exitCode: code ?? null, signal: signal ?? null, stdout, stderr });
+      // `exit` fires only when the server reports a status; `close` always
+      // fires, with garbage (undefined) when the channel died with the
+      // connection. A close without a prior exit is a disconnect, not a
+      // result — resolving it would report a kill as success.
+      stream.once("exit", () => {
+        gotExit = true;
+      });
+      stream.on("close", (code: number | null, sig: string | null) => {
+        if (capture) {
+          stdout += outDecoder.end();
+          stderr += errDecoder.end();
+        }
+        if (!gotExit && typeof code !== "number" && typeof sig !== "string") {
+          finish(() =>
+            reject(
+              new SSHError("远程连接已意外断开", {
+                hint: "命令未正常结束（实例重启或网络中断都可能）；重连后检查远端进程状态。",
+                details: { command },
+              }),
+            ),
+          );
+          return;
+        }
+        finish(() => resolve({ exitCode: code ?? null, signal: sig ?? null, stdout, stderr }));
       });
       stream.on("error", (streamErr: Error) => {
-        if (timer) clearTimeout(timer);
-        if (settled) return;
-        reject(new SSHError(`远程命令执行出错：${streamErr.message}`, { cause: streamErr }));
+        finish(() =>
+          reject(new SSHError(`远程命令执行出错：${streamErr.message}`, { cause: streamErr })),
+        );
       });
     });
   });

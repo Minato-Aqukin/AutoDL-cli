@@ -16,17 +16,18 @@ export interface WaitOptions {
 const TERMINAL_FAILURES = new Set(["failed", "released", "releasing"]);
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(new AutoDLError("操作已取消"));
-      },
-      { once: true },
-    );
-  });
+  if (signal?.aborted) return Promise.reject(new AutoDLError("操作已取消"));
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  const onAbort = (): void => {
+    clearTimeout(timer);
+    reject(new AutoDLError("操作已取消"));
+  };
+  const timer = setTimeout(() => {
+    signal?.removeEventListener("abort", onAbort);
+    resolve();
+  }, ms);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  return promise;
 }
 
 /**
@@ -45,9 +46,10 @@ export async function waitForStatus(
   const intervalMs = options.intervalMs ?? 5_000;
   const wanted = new Set(targets);
   const startedAt = Date.now();
-
   for (;;) {
+    if (options.signal?.aborted) throw new AutoDLError("操作已取消");
     const status = await getInstanceStatus(client, uuid);
+    if (options.signal?.aborted) throw new AutoDLError("操作已取消");
     const elapsed = Date.now() - startedAt;
     options.onPoll?.(status, elapsed);
 

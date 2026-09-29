@@ -22,6 +22,7 @@ import { assertBudget } from "../guard/budget.js";
 import { composeStartCommand, recordTTL } from "../guard/ttl.js";
 import { debug, isJson, note, success, warn } from "../output/format.js";
 import { t } from "../output/i18n.js";
+import { assertNotAborted } from "../ssh/credentials.js";
 import { execCommand } from "../ssh/exec.js";
 import { pull, push } from "../ssh/transfer.js";
 
@@ -63,6 +64,12 @@ export interface RunResult {
   downloaded: { files: number; bytes: number } | null;
   finalAction: "poweroff" | "release" | "keep";
   durationMs: number;
+  /**
+   * What the post-run cleanup actually achieved. `finalAction` is the request;
+   * this is the outcome — a failed power_off must not report `poweroff` as fact,
+   * because in `--json`/MCP mode nobody sees the `warn()` it used to hide behind.
+   */
+  cleanup: { stopped: boolean; released: boolean; error: string | null };
 }
 
 /**
@@ -114,6 +121,8 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
   // process dies before it can do anything else.
   const startCommand = composeStartCommand(options.ttlSeconds, undefined);
 
+  // Ctrl-C during the budget/stock checks must not rent a GPU nobody will use.
+  assertNotAborted(options.signal);
   note(t("instance.creating"));
   const uuid = await createInstance(client, {
     gpuSpec: spec.id,
@@ -138,6 +147,8 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
   let exitCode: number | null = null;
   let stdout = "";
   let stderr = "";
+  /** Set when the work threw; cleanup still runs before it is rethrown. */
+  let failure: { error: unknown } | undefined;
 
   try {
     note(t("instance.waiting"));
@@ -181,9 +192,11 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
       });
       success(`已回传 ${downloaded.files} 个文件到 ${target}`);
     }
-  } finally {
-    await finish(client, uuid, onFinish);
+  } catch (err) {
+    failure = { error: err };
   }
+  const cleanup = await finish(client, uuid, onFinish);
+  if (failure) throw withCleanupFailure(failure.error, uuid, cleanup);
 
   return {
     instanceUuid: uuid,
@@ -194,21 +207,41 @@ export async function runWorkflow(client: AutoDLClient, options: RunOptions): Pr
     downloaded,
     finalAction: onFinish,
     durationMs: Date.now() - startedAt,
+    cleanup,
   };
 }
 
 /**
- * Cleanup runs in a `finally`, so it must never throw — an exception here would mask
- * the real error and, worse, hide the fact that the instance is still running.
+ * A run that throws must not hide a failed cleanup either: the thrown error is all an
+ * agent sees, so fold the cleanup failure into its message (type and exit code kept).
+ */
+export function withCleanupFailure(
+  error: unknown,
+  uuid: string,
+  cleanup: RunResult["cleanup"],
+): unknown {
+  if (!cleanup.error || !(error instanceof Error)) return error;
+  const state = cleanup.stopped ? `实例 ${uuid} 已关机但未释放` : `实例 ${uuid} 可能仍在计费`;
+  error.message = `${error.message}（收尾也失败：${state}：${cleanup.error}）`;
+  return error;
+}
+
+/**
+ * Cleanup runs on every exit path, so it must never throw — an exception here would
+ * mask the real error and, worse, hide the fact that the instance is still running.
+ *
+ * Returns what was actually achieved so the caller can report it (and exit
+ * non-zero) instead of hiding a failed power_off behind a `warn()` that `--json`
+ * and MCP mode never display.
  */
 async function finish(
   client: AutoDLClient,
   uuid: string,
   action: "poweroff" | "release" | "keep",
-): Promise<void> {
+): Promise<RunResult["cleanup"]> {
   if (action === "keep") {
     warn(`实例 ${uuid} 仍在运行（--on-finish keep），记得手动关机：autodl stop ${uuid}`);
-    return;
+    return { stopped: false, released: false, error: null };
   }
 
   note(t("run.cleanup"));
@@ -220,9 +253,10 @@ async function finish(
     }
     success(`实例 ${uuid} 已关机，计费已停止`);
   } catch (err) {
-    warn(`自动关机失败：${(err as Error).message}`);
+    const message = (err as Error).message;
+    warn(`自动关机失败：${message}`);
     warn(`请立即手动处理：autodl stop ${uuid}`);
-    return;
+    return { stopped: false, released: false, error: message };
   }
 
   if (action === "release") {
@@ -232,11 +266,14 @@ async function finish(
       await releaseInstance(client, uuid);
       untrackInstance(uuid);
       success(`实例 ${uuid} 已释放`);
+      return { stopped: true, released: true, error: null };
     } catch (err) {
-      warn(`释放失败（实例已关机，不再计费）：${(err as Error).message}`);
+      const message = (err as Error).message;
+      warn(`释放失败（实例已关机，不再计费）：${message}`);
       warn(`稍后可重试：autodl rm ${uuid} --yes`);
+      return { stopped: true, released: false, error: message };
     }
-  } else {
-    untrackInstance(uuid);
   }
+  untrackInstance(uuid);
+  return { stopped: true, released: false, error: null };
 }

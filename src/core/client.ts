@@ -191,9 +191,8 @@ export class AutoDLClient {
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    let response: Response;
     try {
-      response = await this.fetchImpl(url, {
+      const response = await this.fetchImpl(url, {
         method,
         headers: {
           Authorization: this.token,
@@ -204,7 +203,30 @@ export class AutoDLClient {
         ...(payload !== undefined ? { body: payload } : {}),
         signal: controller.signal,
       });
+      // Read the body under the same timeout: a stalled body must fail as a
+      // TIMEOUT (retriable), and a mid-body reset must surface as NETWORK
+      // (retriable) rather than a raw TypeError that skips the retry budget.
+      let status: number;
+      let text: string;
+      try {
+        status = response.status;
+        text = await response.text();
+      } catch (err) {
+        if (controller.signal.aborted) {
+          throw new TimeoutError(`请求超时：${method} ${path}`, {
+            details: { retriable: true },
+            cause: err,
+          });
+        }
+        throw new AutoDLError(`网络请求失败：${method} ${path}`, {
+          code: "NETWORK",
+          details: { retriable: true },
+          cause: err,
+        });
+      }
+      return this.readEnvelope<T>(status, text, method, path);
     } catch (err) {
+      if (err instanceof AutoDLError) throw err;
       if (controller.signal.aborted) {
         throw new TimeoutError(`请求超时：${method} ${path}`, {
           details: { retriable: true },
@@ -219,8 +241,6 @@ export class AutoDLClient {
     } finally {
       clearTimeout(timer);
     }
-
-    return this.readEnvelope<T>(response.status, await response.text(), method, path);
   }
 
   /** GET with a JSON body — legal HTTP/1.1, but fetch refuses, so drop to node:https. */
@@ -250,7 +270,22 @@ export class AutoDLClient {
         },
         (res) => {
           const chunks: Buffer[] = [];
+          // Without an "error" listener the response is destroyed silently on a
+          // mid-body connection reset — no "end", no "error" on the request, and
+          // the socket timeout dies with the socket — so this promise never
+          // settles. Rejections flow through request()'s retry budget as NETWORK.
+          const onResError = (err: Error): void => {
+            reject(
+              new AutoDLError(`网络请求失败：GET ${path}`, {
+                code: "NETWORK",
+                details: { retriable: true },
+                cause: err,
+              }),
+            );
+          };
           res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("error", onResError);
+          res.on("aborted", () => onResError(new Error("response aborted by the server")));
           res.on("end", () => {
             try {
               resolve(
@@ -268,7 +303,7 @@ export class AutoDLClient {
         },
       );
       req.on("timeout", () => {
-        req.destroy();
+        req.destroy(new TimeoutError(`请求超时：GET ${path}`, { details: { retriable: true } }));
         reject(new TimeoutError(`请求超时：GET ${path}`, { details: { retriable: true } }));
       });
       req.on("error", (err) =>
@@ -318,14 +353,15 @@ export class AutoDLClient {
   }
 }
 
-function looksLikeMissingParam(msg: string): boolean {
-  const m = (msg ?? "").toLowerCase();
+function looksLikeMissingParam(msg: string | undefined): boolean {
+  const raw = msg ?? "";
+  const m = raw.toLowerCase();
   return (
     m.includes("param") ||
     m.includes("bind") ||
     m.includes("required") ||
-    msg.includes("参数") ||
-    msg.includes("必填")
+    raw.includes("参数") ||
+    raw.includes("必填")
   );
 }
 
@@ -353,7 +389,11 @@ export function mapEnvelopeError(code: string, msg: string, requestId?: string):
     });
   }
   if (text.includes("余额") || lower.includes("balance") || lower.includes("insufficient fund")) {
-    return new BudgetError(message, { ...opts, hint: "请先充值，或降低所需 GPU 规格。" });
+    return new BudgetError(message, {
+      ...opts,
+      code: "INSUFFICIENT_BALANCE",
+      hint: "请先充值，或降低所需 GPU 规格。",
+    });
   }
   if (
     text.includes("库存") ||

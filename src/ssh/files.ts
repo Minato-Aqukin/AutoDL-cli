@@ -243,8 +243,9 @@ class RemoteIO implements FileIO {
 async function openSftp(
   client: AutoDLClient,
   uuid: string,
-  signal?: AbortSignal,
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ conn: Client; io: RemoteIO }> {
+  const { signal } = options;
   const conn = await connectSSH(client, uuid, {
     ...(signal ? { signal } : {}),
     connectAttempts: 1,
@@ -283,7 +284,7 @@ async function remote<T>(
   fn: (io: RemoteIO) => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const { conn, io } = await openSftp(client, uuid, signal);
+  const { conn, io } = await openSftp(client, uuid, { signal });
   try {
     return await fn(io);
   } finally {
@@ -359,6 +360,7 @@ const CheckpointSchema = z.object({
   key: z.string(),
   choice: z.enum(["overwrite", "skip", "keep-both"]).optional(),
   files: z.record(
+    z.string(),
     z.object({ size: z.number(), mtime: z.number(), target: z.string(), complete: z.boolean() }),
   ),
 });
@@ -369,11 +371,71 @@ interface PlannedFile {
   info: Info;
 }
 
-/** Local filesystem plus one reusable authenticated SFTP connection. */
+/**
+ * Serialized, throttled disk writer for the transfer checkpoint.
+ *
+ * Every flush chains onto the previous one, so concurrent triggers (the 1 s
+ * timer, the abort hook, the per-file saves, the completion save) never share
+ * one temp file and a slow write can't interleave with the next. Callers still
+ * observe their own write's errors; the chain itself never breaks.
+ */
+export function createCheckpointSaver(
+  write: () => Promise<void>,
+  throttleMs = 1000,
+): {
+  save: (force?: boolean) => Promise<void>;
+  flush: () => Promise<void>;
+  stop: () => void;
+} {
+  let flight: Promise<void> = Promise.resolve();
+  let lastWrite = 0;
+  let timer: NodeJS.Timeout | undefined;
+  const flush = (): Promise<void> => {
+    const run = flight.then(async () => {
+      await write();
+      lastWrite = Date.now();
+    });
+    // The chain never breaks: a failed write still rejects its own caller
+    // through `run`, but the next flush gets a clean slot.
+    flight = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  };
+  const save = async (force = false): Promise<void> => {
+    if (force) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      await flush();
+      return;
+    }
+    // Throttle: at most one write per window during steady progress; abort
+    // and completion paths force a flush so resume never loses much.
+    if (Date.now() - lastWrite >= throttleMs) {
+      await flush();
+      return;
+    }
+    timer ??= setTimeout(() => {
+      timer = undefined;
+      void flush().catch(() => undefined);
+    }, throttleMs);
+    timer.ref?.();
+  };
+  const stop = (): void => {
+    clearTimeout(timer);
+    timer = undefined;
+  };
+  return { save, flush, stop };
+}
+
 export class FileWorkspace {
   private session: { conn: Client; io: RemoteIO } | null = null;
   private connecting: Promise<{ conn: Client; io: RemoteIO }> | null = null;
   private disposed = false;
+  private readonly disposeController = new AbortController();
   constructor(
     private readonly client: AutoDLClient,
     private readonly uuid: string,
@@ -392,6 +454,11 @@ export class FileWorkspace {
   private async withSession<T>(fn: (io: RemoteIO) => Promise<T>): Promise<T> {
     if (this.disposed) throw new Error("文件会话已关闭");
     const live = this.session ?? (await this.connect());
+    if (this.disposed) {
+      // connect() finished after dispose(): it already closed the session,
+      // so never hand it out.
+      throw new Error("文件会话已关闭");
+    }
     try {
       return await fn(live.io);
     } catch (err) {
@@ -401,10 +468,24 @@ export class FileWorkspace {
   }
   private async connect(): Promise<{ conn: Client; io: RemoteIO }> {
     if (this.session) return this.session;
-    this.connecting ??= openSftp(this.client, this.uuid).then(
+    const signal = this.disposeController.signal;
+    this.connecting ??= openSftp(this.client, this.uuid, { signal }).then(
       (session) => {
-        this.session = session;
         this.connecting = null;
+        if (this.disposed) {
+          try {
+            session.io.close();
+          } catch {
+            // Teardown is best effort.
+          }
+          try {
+            session.conn.end();
+          } catch {
+            // Teardown is best effort.
+          }
+          throw new Error("文件会话已关闭");
+        }
+        this.session = session;
         session.conn.once("close", () => this.drop(session));
         return session;
       },
@@ -431,7 +512,9 @@ export class FileWorkspace {
   }
   /** Release the browsing connection; safe to call more than once. */
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
+    this.disposeController.abort();
     this.connecting = null;
     const session = this.session;
     this.session = null;
@@ -537,198 +620,242 @@ export class FileWorkspace {
       if (!missing(err)) throw new Error(`续传记录不可读取：${metadataPath}`, { cause: err });
     }
     if (checkpoint.key !== key) throw new Error("续传任务路径或选项已改变，请创建新任务");
-    const save = async () => {
+    let dirty = false;
+    const writeCheckpoint = async (): Promise<void> => {
+      if (!dirty) return;
       await fs.mkdir(metadataDir, { recursive: true, mode: 0o700 });
-      const temporary = `${metadataPath}.${process.pid}.tmp`;
+      // Unique per flush: a second flush can no longer consume the temp file
+      // of one still in flight (serialization makes that rare; this kills it).
+      const temporary = `${metadataPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       await fs.writeFile(temporary, JSON.stringify(checkpoint), { mode: 0o600 });
-      await fs.rename(temporary, metadataPath);
+      try {
+        await fs.rename(temporary, metadataPath);
+      } catch (err) {
+        await fs.rm(temporary, { force: true }).catch(() => undefined);
+        throw err;
+      }
+      dirty = false;
     };
-    await save();
-    return remote(
-      this.client,
-      this.uuid,
-      async (remoteIO) => {
-        const source = upload ? localIO : remoteIO;
-        const target = upload ? remoteIO : localIO;
-        const files: PlannedFile[] = [];
-        const directories: string[] = [];
-        const skipped: string[] = [];
-        const destinations = new Set<string>();
-        const walk = async (from: string, to: string): Promise<void> => {
-          assertNotAborted(signal);
-          if (destinations.has(to)) throw new Error(`多个来源映射到同一目标：${to}`);
-          destinations.add(to);
-          const info = await source.stat(from);
-          if (!info) throw new Error(`来源不存在：${from}`);
-          if (info.kind === "symlink" || info.kind === "other") {
-            skipped.push(from);
-            return;
-          }
-          if (info.kind === "directory") {
-            directories.push(to);
-            for (const item of await source.entries(from)) {
-              safeName(item.name, !upload);
-              await walk(sourcePaths.join(from, item.name), targetPaths.join(to, item.name));
-            }
-          } else files.push({ source: from, target: to, info });
-        };
-        for (const path of sources) {
-          const name = sourcePaths.basename(path);
-          safeName(name, !upload);
-          await walk(path, targetPaths.join(destination, name));
-        }
-        await ensureDir(target, destination, targetPaths.dirname);
-        for (const dir of directories) {
-          assertNotAborted(signal);
-          await ensureDir(target, dir, targetPaths.dirname);
-        }
-        const total = files.reduce((sum, file) => sum + file.info.size, 0);
-        let transferred = 0,
-          filesDone = 0,
-          copied = 0,
-          bytes = 0,
-          sessionBytes = 0;
-        const started = Date.now();
-        const progress = (file: string) =>
-          callbacks.onProgress({
-            file,
-            transferred,
-            total,
-            filesDone,
-            filesTotal: files.length,
-            bytesPerSecond: (sessionBytes * 1000) / Math.max(1, Date.now() - started),
-          });
-        for (const file of files) {
-          assertNotAborted(signal);
-          const id = createHash("sha256")
-            .update(JSON.stringify([file.source, file.target]))
-            .digest("hex");
-          let saved = checkpoint.files[id];
-          let output = file.target;
-          if (
-            saved &&
-            (targetPaths.dirname(saved.target) !== targetPaths.dirname(output) ||
-              !targetPaths.basename(saved.target).startsWith(targetPaths.basename(output)))
-          )
-            throw new Error("续传目标不在原任务目录内");
-          if (saved) output = saved.target;
-          let existing = await target.stat(output);
-          if (existing && existing.kind !== "file")
-            throw new Error(`目标不是普通文件，未覆盖：${output}`);
-          const unchanged =
-            existing?.size === file.info.size &&
-            Math.floor(existing.mtime / 1000) === Math.floor(file.info.mtime / 1000);
-          let equal = unchanged;
-          if (existing && request.checksum && (request.sync || saved?.complete))
-            equal =
-              existing.size === file.info.size &&
-              (await digest(source, file.source, signal)) ===
-                (await digest(target, output, signal));
-          if (
-            (request.sync ||
-              (saved?.complete &&
-                saved.size === file.info.size &&
-                saved.mtime === file.info.mtime)) &&
-            equal
-          ) {
-            transferred += file.info.size;
-            filesDone++;
-            skipped.push(file.source);
-            progress(file.source);
-            continue;
-          }
-          if (!request.sync && existing && !saved) {
-            const resolution = checkpoint.choice
-              ? { choice: checkpoint.choice, applyToAll: true }
-              : await callbacks.onConflict({
-                  source: file.source,
-                  destination: output,
-                  sourceSize: file.info.size,
-                  destinationSize: existing.size,
-                });
+    const { save, flush, stop: stopSaver } = createCheckpointSaver(writeCheckpoint);
+    const markDirtySave = async (force = false): Promise<void> => {
+      dirty = true;
+      await save(force);
+    };
+    await markDirtySave(true);
+    const onAbortFlush = (): void => {
+      dirty = true;
+      void flush().catch(() => undefined);
+    };
+    let outcome: FileTransferResult;
+    try {
+      outcome = await remote(
+        this.client,
+        this.uuid,
+        async (remoteIO) => {
+          const source = upload ? localIO : remoteIO;
+          const target = upload ? remoteIO : localIO;
+          const files: PlannedFile[] = [];
+          const directories: string[] = [];
+          const skipped: string[] = [];
+          const destinations = new Set<string>();
+          const walk = async (from: string, to: string): Promise<void> => {
             assertNotAborted(signal);
-            if (resolution.applyToAll) {
-              checkpoint.choice = resolution.choice;
-              await save();
+            if (destinations.has(to)) throw new Error(`多个来源映射到同一目标：${to}`);
+            destinations.add(to);
+            const info = await source.stat(from);
+            if (!info) throw new Error(`来源不存在：${from}`);
+            if (info.kind === "symlink" || info.kind === "other") {
+              skipped.push(from);
+              return;
             }
-            if (resolution.choice === "skip") {
-              skipped.push(file.source);
+            if (info.kind === "directory") {
+              directories.push(to);
+              for (const item of await source.entries(from)) {
+                safeName(item.name, !upload);
+                await walk(sourcePaths.join(from, item.name), targetPaths.join(to, item.name));
+              }
+            } else files.push({ source: from, target: to, info });
+          };
+          for (const path of sources) {
+            const name = sourcePaths.basename(path);
+            safeName(name, !upload);
+            await walk(path, targetPaths.join(destination, name));
+          }
+          await ensureDir(target, destination, targetPaths.dirname);
+          for (const dir of directories) {
+            assertNotAborted(signal);
+            await ensureDir(target, dir, targetPaths.dirname);
+          }
+          const total = files.reduce((sum, file) => sum + file.info.size, 0);
+          let transferred = 0,
+            filesDone = 0,
+            copied = 0,
+            bytes = 0,
+            sessionBytes = 0;
+          const started = Date.now();
+          const progress = (file: string) =>
+            callbacks.onProgress({
+              file,
+              transferred,
+              total,
+              filesDone,
+              filesTotal: files.length,
+              bytesPerSecond: (sessionBytes * 1000) / Math.max(1, Date.now() - started),
+            });
+          for (const file of files) {
+            assertNotAborted(signal);
+            const id = createHash("sha256")
+              .update(JSON.stringify([file.source, file.target]))
+              .digest("hex");
+            let saved = checkpoint.files[id];
+            let output = file.target;
+            if (
+              saved &&
+              (targetPaths.dirname(saved.target) !== targetPaths.dirname(output) ||
+                !targetPaths.basename(saved.target).startsWith(targetPaths.basename(output)))
+            )
+              throw new Error("续传目标不在原任务目录内");
+            if (saved) output = saved.target;
+            let existing = await target.stat(output);
+            if (existing && existing.kind !== "file")
+              throw new Error(`目标不是普通文件，未覆盖：${output}`);
+            const unchanged =
+              existing?.size === file.info.size &&
+              Math.floor(existing.mtime / 1000) === Math.floor(file.info.mtime / 1000);
+            let equal = unchanged;
+            if (existing && request.checksum && (request.sync || saved?.complete))
+              equal =
+                existing.size === file.info.size &&
+                (await digest(source, file.source, signal)) ===
+                  (await digest(target, output, signal));
+            if (
+              (request.sync ||
+                (saved?.complete &&
+                  saved.size === file.info.size &&
+                  saved.mtime === file.info.mtime)) &&
+              equal
+            ) {
               transferred += file.info.size;
               filesDone++;
+              skipped.push(file.source);
               progress(file.source);
               continue;
             }
-            if (resolution.choice === "keep-both") {
-              let n = 1;
-              while (await target.stat(`${file.target} (${n})`)) n++;
-              output = `${file.target} (${n})`;
-              existing = null;
-            }
-          }
-          const temporary = targetPaths.join(
-            targetPaths.dirname(output),
-            `.autodl-${request.id}-${id.slice(0, 16)}.part`,
-          );
-          await ensureDir(target, targetPaths.dirname(output), targetPaths.dirname);
-          let partial = await target.stat(temporary);
-          if (partial && partial.kind !== "file")
-            throw new Error(`续传临时路径不是普通文件：${temporary}`);
-          const versionMatches = saved?.size === file.info.size && saved.mtime === file.info.mtime;
-          let offset = versionMatches && partial ? partial.size : 0;
-          if (offset > file.info.size) offset = 0;
-          if (
-            offset > 0 &&
-            (await digest(source, file.source, signal, offset - 1)) !==
-              (await digest(target, temporary, signal, offset - 1))
-          )
-            offset = 0;
-          if (partial && offset === 0) {
-            await target.unlink(temporary);
-            partial = null;
-          }
-          checkpoint.files[id] = {
-            size: file.info.size,
-            mtime: file.info.mtime,
-            target: output,
-            complete: false,
-          };
-          saved = checkpoint.files[id];
-          await save();
-          transferred += offset;
-          progress(file.source);
-          if (offset < file.info.size || !partial) {
-            const meter = new Transform({
-              transform(chunk: Buffer, _encoding, done) {
-                transferred += chunk.length;
-                sessionBytes += chunk.length;
+            if (!request.sync && existing && !saved) {
+              const resolution = checkpoint.choice
+                ? { choice: checkpoint.choice, applyToAll: true }
+                : await callbacks.onConflict({
+                    source: file.source,
+                    destination: output,
+                    sourceSize: file.info.size,
+                    destinationSize: existing.size,
+                  });
+              assertNotAborted(signal);
+              if (resolution.applyToAll) {
+                checkpoint.choice = resolution.choice;
+                await markDirtySave();
+              }
+              if (resolution.choice === "skip") {
+                skipped.push(file.source);
+                transferred += file.info.size;
+                filesDone++;
                 progress(file.source);
-                done(null, chunk);
-              },
-            });
-            await pipeline(
-              source.read(file.source, offset),
-              meter,
-              target.write(temporary, offset, Boolean(partial)),
-              { signal },
+                continue;
+              }
+              if (resolution.choice === "keep-both") {
+                let n = 1;
+                while (await target.stat(`${file.target} (${n})`)) n++;
+                output = `${file.target} (${n})`;
+                existing = null;
+              }
+            }
+            const temporary = targetPaths.join(
+              targetPaths.dirname(output),
+              `.autodl-${request.id}-${id.slice(0, 16)}.part`,
             );
+            await ensureDir(target, targetPaths.dirname(output), targetPaths.dirname);
+            let partial = await target.stat(temporary);
+            if (partial && partial.kind !== "file")
+              throw new Error(`续传临时路径不是普通文件：${temporary}`);
+            const versionMatches =
+              saved?.size === file.info.size && saved.mtime === file.info.mtime;
+            let offset = versionMatches && partial ? partial.size : 0;
+            if (offset > file.info.size) offset = 0;
+            if (
+              offset > 0 &&
+              (await digest(source, file.source, signal, offset - 1)) !==
+                (await digest(target, temporary, signal, offset - 1))
+            )
+              offset = 0;
+            if (partial && offset === 0) {
+              await target.unlink(temporary);
+              partial = null;
+            }
+            checkpoint.files[id] = {
+              size: file.info.size,
+              mtime: file.info.mtime,
+              target: output,
+              complete: false,
+            };
+            saved = checkpoint.files[id];
+            await markDirtySave();
+            transferred += offset;
+            progress(file.source);
+            if (offset < file.info.size || !partial) {
+              const meter = new Transform({
+                transform(chunk: Buffer, _encoding, done) {
+                  transferred += chunk.length;
+                  sessionBytes += chunk.length;
+                  progress(file.source);
+                  done(null, chunk);
+                },
+              });
+              await pipeline(
+                source.read(file.source, offset),
+                meter,
+                target.write(temporary, offset, Boolean(partial)),
+                { signal },
+              );
+            }
+            assertNotAborted(signal);
+            if (!sameVersion(await source.stat(file.source), file.info))
+              throw new Error(`来源在传输中发生变化，未覆盖目标：${file.source}`);
+            if (!sameVersion(await target.stat(output), existing))
+              throw new Error(`目标在传输中发生变化，未覆盖：${output}`);
+            await target.times(temporary, file.info.mtime);
+            await target.rename(temporary, output, Boolean(existing));
+            saved.complete = true;
+            await markDirtySave();
+            copied++;
+            bytes += file.info.size;
+            filesDone++;
+            progress(file.source);
           }
-          assertNotAborted(signal);
-          if (!sameVersion(await source.stat(file.source), file.info))
-            throw new Error(`来源在传输中发生变化，未覆盖目标：${file.source}`);
-          if (!sameVersion(await target.stat(output), existing))
-            throw new Error(`目标在传输中发生变化，未覆盖：${output}`);
-          await target.times(temporary, file.info.mtime);
-          await target.rename(temporary, output, Boolean(existing));
-          saved.complete = true;
-          await save();
-          copied++;
-          bytes += file.info.size;
-          filesDone++;
-          progress(file.source);
-        }
-        return { files: copied, bytes, skipped };
-      },
-      signal,
-    );
+          return { files: copied, bytes, skipped };
+        },
+        signal,
+      );
+    } catch (err) {
+      // Persist what completed so resume picks up; the throttled saver may
+      // still hold the last completions in memory.
+      dirty = true;
+      try {
+        await flush();
+      } catch {
+        // The original error matters, not the checkpoint write.
+      }
+      throw err;
+    } finally {
+      signal.removeEventListener("abort", onAbortFlush);
+      stopSaver();
+    }
+    // Completion: force the final state to disk, then remove the checkpoint —
+    // a finished job resumes as finished, not by replaying the file list.
+    // Await the chain first: a late timer flush queued before stopSaver must
+    // land before the rm, or it would resurrect the checkpoint afterwards.
+    dirty = true;
+    await flush();
+    await fs.rm(metadataPath, { force: true }).catch(() => undefined);
+    return outcome;
   }
 }

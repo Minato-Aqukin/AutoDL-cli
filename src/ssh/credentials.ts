@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { Client } from "ssh2";
+import type { Client } from "ssh2";
 import type { AutoDLClient } from "../core/client.js";
 import {
   getInstanceSnapshot,
@@ -110,8 +110,12 @@ const RETRY_DELAYS_MS = [2_000, 5_000, 8_000];
 
 async function connectOnce(creds: SSHCredentials, options: ConnectOptions): Promise<Client> {
   assertNotAborted(options.signal);
+  // Loaded on first connect: ssh2 costs ~30ms to import, which commands that never
+  // open a session (ls, stock, mcp handshake) should not pay at startup.
+  const { Client: SSHClient } = await import("ssh2");
+  assertNotAborted(options.signal);
   const { promise, resolve, reject } = Promise.withResolvers<Client>();
-  const conn = new Client();
+  const conn = new SSHClient();
   let settled = false;
   const settle = (err?: Error) => {
     if (settled) return;
@@ -177,14 +181,48 @@ export async function withSSH<T>(
 ): Promise<T> {
   const conn = await connectSSH(client, uuid, options);
   const creds = (conn as unknown as { _creds?: SSHCredentials })._creds;
+  // A listener must survive the whole operation: without one, any client
+  // `error` after the handshake (socket reset, keepalive timeout, server
+  // DISCONNECT) is an unhandled EventEmitter error and kills the process.
+  // Kept attached until `conn.end()` has been called so teardown races can't
+  // crash either; it only logs — in-flight work rejects via the race below.
+  const onConnError = (err: Error): void => {
+    debug(`SSH 连接出错：${err instanceof Error ? err.message : String(err)}`);
+  };
+  conn.on("error", onConnError);
   try {
     // Fresh per connection, never cached across calls: connectSSH attaches the
     // credentials used for this handshake and we detach them before closing.
     if (!creds) throw new SSHError("SSH 连接缺少凭证上下文", { details: { uuid } });
-    return await fn(conn, creds);
+    let onLost: ((err: Error) => void) | undefined;
+    let onClosed: (() => void) | undefined;
+    try {
+      const loss = new Promise<never>((_, reject) => {
+        onLost = (err: Error) => {
+          reject(
+            err instanceof SSHError
+              ? err
+              : new SSHError(`SSH 连接出错：${err.message}`, { cause: err }),
+          );
+        };
+        onClosed = () => {
+          reject(new SSHError("SSH 连接已意外断开", { details: { uuid } }));
+        };
+        conn.once("error", onLost);
+        conn.once("close", onClosed);
+      });
+      return await Promise.race([fn(conn, creds), loss]);
+    } finally {
+      if (onLost) conn.off("error", onLost);
+      if (onClosed) conn.off("close", onClosed);
+    }
   } finally {
     delete (conn as unknown as { _creds?: SSHCredentials })._creds;
-    conn.end();
+    try {
+      conn.end();
+    } finally {
+      conn.off("error", onConnError);
+    }
   }
 }
 

@@ -9,7 +9,7 @@ import {
   powerOnInstance,
   releaseInstance,
 } from "../../src/core/endpoints/instance.js";
-import { NotFoundError, UsageError } from "../../src/core/errors.js";
+import { AutoDLError, NotFoundError, UsageError } from "../../src/core/errors.js";
 import { mockFetch } from "../fixtures/mock-fetch.js";
 import {
   badRegionResponse,
@@ -200,5 +200,26 @@ describe("getInstanceSnapshot", () => {
       password: "jbeOXgTWUxq+",
     });
     expect(snapshot.priceYuanPerHour).toBe(1.97);
+  });
+});
+
+describe("power_off idempotency", () => {
+  it("treats an already-stopping instance as success", async () => {
+    const fetchMock = mockFetch([
+      {
+        path: POWER_OFF,
+        statuses: [504, 200],
+        response: (_call: unknown, index: number) =>
+          index === 0 ? {} : { code: "Fail", msg: "当前实例正在关机中,无需重复操作" },
+      },
+    ]);
+    await expect(powerOffInstance(client(fetchMock.impl), "pro-1")).resolves.toBeUndefined();
+  });
+
+  it("still throws genuine power_off failures", async () => {
+    const fetchMock = mockFetch([
+      { path: POWER_OFF, response: { code: "Fail", msg: "something else broke" } },
+    ]);
+    await expect(powerOffInstance(client(fetchMock.impl), "pro-1")).rejects.toThrow(AutoDLError);
   });
 });

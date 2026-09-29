@@ -190,6 +190,25 @@ describe("the key hints name whoever owns the keyboard", () => {
   });
 });
 
+describe("the dashboard create key", () => {
+  it("opens the wizard with `n` when the account has no instances", async () => {
+    state.rows = [];
+    const { stdin, lastFrame } = mount();
+    await flush();
+    expect(plain(lastFrame())).toContain("没有实例");
+
+    stdin.write("n");
+    await flush();
+    expect(plain(lastFrame())).toContain("新建实例");
+  });
+
+  it("advertises `n 新建` in the dashboard key hints", async () => {
+    const { lastFrame } = mount();
+    await flush();
+    expect(plain(lastFrame())).toContain("n 新建");
+  });
+});
+
 describe("the highlight and the action keys agree on the selection", () => {
   it("keeps a row highlighted when the list shrinks under the cursor", async () => {
     state.rows = [makeRow("1"), makeRow("2"), makeRow("3")];

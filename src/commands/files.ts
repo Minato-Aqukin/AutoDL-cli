@@ -1,16 +1,16 @@
 import { createHash } from "node:crypto";
+import { resolve as resolveLocal } from "node:path";
 import type { Command } from "commander";
 import { resolveBaseUrl, resolveToken } from "../config/store.js";
 import type { Context } from "../context.js";
 import { DEFAULT_BASE_URL } from "../core/client.js";
-import { UsageError } from "../core/errors.js";
-import { emit, isJson, note, printKeyValues, success } from "../output/format.js";
+import { AutoDLError, UsageError } from "../core/errors.js";
+import { emit, note, printKeyValues, success } from "../output/format.js";
 import { getCredentials } from "../ssh/credentials.js";
 import { FileWorkspace } from "../ssh/files.js";
 import { TransferQueue } from "../ssh/transfer-queue.js";
 import { identityFromToken } from "../tui/account.js";
 import { action, confirmDestructive, globalsOf } from "./helpers.js";
-
 /** Same account/baseURL scoping as the dashboard, so CLI and TUI share one queue. */
 export function queueNamespace(token: string, baseUrl: string | undefined): string {
   const identity = identityFromToken(token);
@@ -169,16 +169,24 @@ export function registerFileCommands(program: Command): void {
         ) => {
           const { queue: transferQueue, release } = queueFor(context, command);
           try {
+            // Persist absolute local paths: FileWorkspace.transfer resolves
+            // against the resuming process's cwd, so a relative path stored
+            // by one cwd breaks resume from anywhere else (dashboard included).
             const jobId = transferQueue.enqueue({
               uuid: id,
               direction: options.download ? "download" : "upload",
-              sources: [source],
-              destination,
+              sources: options.download ? [source] : [resolveLocal(source)],
+              destination: options.download ? resolveLocal(destination) : destination,
               sync: options.sync,
               checksum: options.checksum,
             });
             if (options.wait) {
               const done = await waitForJob(transferQueue, jobId);
+              if (done.state !== "completed") {
+                throw new AutoDLError(
+                  `任务 ${jobId} 未完成（${STATE_LABEL[done.state] ?? done.state}${done.error ? `：${done.error}` : ""}）`,
+                );
+              }
               emit({ jobId, ...done }, () =>
                 success(`任务 ${jobId}：${STATE_LABEL[done.state] ?? done.state}`),
               );
@@ -235,13 +243,19 @@ export function registerFileCommands(program: Command): void {
 
   queue
     .command("resume <jobId>")
-    .description("恢复已暂停/已取消的任务（需实例运行中，不自动开机）")
+    .description("恢复已暂停/已取消的任务并等待完成（需实例运行中，不自动开机）")
     .action(
       action(async (context, jobId: string, _options: unknown, command: Command) => {
         const { queue: transferQueue, release } = queueFor(context, command);
         try {
           transferQueue.resume(jobId);
-          emit({ jobId, resumed: true }, () => success(`已恢复 ${jobId}`));
+          const done = await waitForJob(transferQueue, jobId);
+          if (done.state !== "completed") {
+            throw new AutoDLError(
+              `任务 ${jobId} 未完成（${STATE_LABEL[done.state] ?? done.state}${done.error ? `：${done.error}` : ""}）`,
+            );
+          }
+          emit({ jobId, resumed: true, ...done }, () => success(`已恢复 ${jobId}`));
           return 0;
         } finally {
           await release();
@@ -284,7 +298,13 @@ export function registerFileCommands(program: Command): void {
           const { queue: transferQueue, release } = queueFor(context, command);
           try {
             transferQueue.resolveConflict(jobId, { choice, applyToAll: options.all });
-            emit({ jobId, choice, applyToAll: options.all }, () =>
+            const done = await waitForJob(transferQueue, jobId);
+            if (done.state !== "completed") {
+              throw new AutoDLError(
+                `任务 ${jobId} 未完成（${STATE_LABEL[done.state] ?? done.state}${done.error ? `：${done.error}` : ""}）`,
+              );
+            }
+            emit({ jobId, choice, applyToAll: options.all, ...done }, () =>
               success(`已处理冲突：${choice}`),
             );
             return 0;
@@ -317,9 +337,10 @@ async function waitForJob(
       done(job.state, job.error ?? "任务已暂停");
       return true;
     }
-    // conflict needs an interactive answer; in --json mode nobody can answer.
-    if (job.state === "conflict" && isJson()) {
-      done(job.state, job.error ?? "任务等待冲突确认（非交互模式无法回答）");
+    if (job.state === "conflict") {
+      // No prompt in the CLI: the holder answers via `queue resolve` (same
+      // process or another), which resumes the job and wakes this waiter.
+      done(job.state, job.error ?? "任务等待冲突确认（用 queue resolve 回答）");
       return true;
     }
     return false;

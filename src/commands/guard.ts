@@ -1,13 +1,13 @@
 import type { Command } from "commander";
 import pc from "picocolors";
-import { listTracked } from "../config/state.js";
+import { listTracked, untrackInstance } from "../config/state.js";
 import { formatDuration, parseDuration } from "../core/duration.js";
 import { saveImage } from "../core/endpoints/image.js";
 import { watchIdle } from "../guard/idle.js";
 import { armTTLOverSSH, disarmTTLOverSSH, recordTTL, sweepExpired } from "../guard/ttl.js";
 import { emit, note, printTable, success, warn } from "../output/format.js";
 import { t } from "../output/i18n.js";
-import { action, lazyAction } from "./helpers.js";
+import { action, lazyAction, parseNumericFlag } from "./helpers.js";
 
 export function registerGuardCommands(program: Command): void {
   const guard = program.command("guard").description("成本护栏：定时关机、闲置检测、超时清理");
@@ -35,10 +35,17 @@ export function registerGuardCommands(program: Command): void {
     .action(
       action(async (context, id: string) => {
         const ok = await disarmTTLOverSSH(context.client, id);
+        // The sweep keys off the local ledger, not the in-instance timer: leaving the
+        // entry means the next `ls`/`exec` powers off the job the user just rescued.
+        // That part is under our control, so honour the cancel even when the
+        // in-instance timer could not be confirmed gone.
+        untrackInstance(id);
         emit({ uuid: id, cancelled: ok }, () =>
-          ok ? success("已取消定时关机") : warn("未能确认取消结果，请手动检查实例内定时任务"),
+          ok
+            ? success("已取消定时关机")
+            : warn("本机台账已清除，但未能确认实例内定时关机已取消，请登录实例手动检查"),
         );
-        return 0;
+        return ok ? 0 : 1;
       }),
     );
 
@@ -62,8 +69,8 @@ export function registerGuardCommands(program: Command): void {
 
           try {
             const result = await watchIdle(context.client, id, {
-              thresholdPercent: Number(options.threshold),
-              samples: Number(options.samples),
+              thresholdPercent: parseNumericFlag(options.threshold, "threshold", { min: 0 }),
+              samples: parseNumericFlag(options.samples, "samples", { integer: true, min: 1 }),
               intervalSeconds: parseDuration(options.interval),
               dryRun: options.dryRun,
               signal: controller.signal,

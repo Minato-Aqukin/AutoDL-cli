@@ -51,6 +51,21 @@ export function parseRepo(input: string): ParsedRepo {
     } catch {
       throw new UsageError(`无法解析仓库地址 "${input}"`);
     }
+    // `host` keeps an explicit non-default port (`url.host`), while WHATWG drops
+    // :443/:80 automatically — so accelerated-host matching still works. Plain
+    // `hostname` would silently rewrite https://git.example.com:8443/… to :443.
+    host = url.host;
+    path = url.pathname;
+  } else if (/^ssh:\/\//i.test(trimmed)) {
+    // The copy-paste form GitLab offers: ssh://git@gitlab.com/team/proj.git.
+    // We clone over https with a token, so drop the SSH user and port.
+    let url: URL;
+    try {
+      url = new URL(trimmed);
+    } catch {
+      throw new UsageError(`无法解析仓库地址 "${input}"`);
+    }
+    if (!url.hostname) throw new UsageError(`无法解析仓库地址 "${input}"`);
     host = url.hostname;
     path = url.pathname;
   } else if (trimmed.startsWith("git@") || SCP_LIKE.test(trimmed)) {
@@ -77,12 +92,15 @@ export function parseRepo(input: string): ParsedRepo {
   }
 
   const name = path.split("/").pop() as string;
+  // `host` may carry an explicit port (url.host); acceleration matching uses the
+  // bare hostname so https://github.com:8443/… still matches github.com.
+  const bareHost = host.split(":")[0]?.toLowerCase() ?? host;
   return {
     host,
     path,
     name,
     cloneUrl: `https://${host}/${path}.git`,
-    needsAcceleration: ACCELERATED_HOSTS.has(host),
+    needsAcceleration: ACCELERATED_HOSTS.has(bareHost),
   };
 }
 
@@ -110,9 +128,23 @@ export function redactCredentials(text: string): string {
   return text.replace(/(https?:\/\/)([^/@\s]+)@/gi, "$1***@");
 }
 
-/** Resolve a git token from the flag, then the usual environment variables. */
-export function resolveGitToken(explicit?: string): string | undefined {
-  const candidate =
-    explicit ?? process.env.GIT_TOKEN ?? process.env.GITHUB_TOKEN ?? process.env.GITEE_TOKEN;
-  return candidate?.trim() ? candidate.trim() : undefined;
+/**
+ * Resolve a git token from the flag, then the usual environment variables.
+ *
+ * Host scoping keeps a GitHub token from leaking to an unrelated host: `GIT_TOKEN`
+ * is always eligible, `GITHUB_TOKEN` only for github.com, `GITEE_TOKEN` only for
+ * gitee.com. Without a host (the original one-argument form) the old
+ * GIT_TOKEN → GITHUB_TOKEN → GITEE_TOKEN order still applies.
+ */
+export function resolveGitToken(explicit?: string, host?: string): string | undefined {
+  if (explicit?.trim()) return explicit.trim();
+  const normalized = host?.toLowerCase().split(":")[0];
+  const candidates = [process.env.GIT_TOKEN];
+  if (normalized === undefined || normalized === "github.com") {
+    candidates.push(process.env.GITHUB_TOKEN);
+  }
+  if (normalized === undefined || normalized === "gitee.com") {
+    candidates.push(process.env.GITEE_TOKEN);
+  }
+  return candidates.find((token) => token?.trim())?.trim();
 }

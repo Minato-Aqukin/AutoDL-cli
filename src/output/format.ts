@@ -1,4 +1,3 @@
-import Table from "cli-table3";
 import pc from "picocolors";
 import type { AutoDLError } from "../core/errors.js";
 
@@ -83,30 +82,34 @@ export function emitError(error: AutoDLError): void {
   }
 }
 
+/** Box-drawn table: one-space padding, a rule under the header and between rows. */
 export function table(head: string[], rows: (string | number)[][]): string {
-  const t = new Table({
-    head: head.map((h) => pc.bold(h)),
-    style: { head: [], border: [] },
-    chars: {
-      top: "─",
-      "top-mid": "┬",
-      "top-left": "┌",
-      "top-right": "┐",
-      bottom: "─",
-      "bottom-mid": "┴",
-      "bottom-left": "└",
-      "bottom-right": "┘",
-      left: "│",
-      "left-mid": "├",
-      mid: "─",
-      "mid-mid": "┼",
-      right: "│",
-      "right-mid": "┤",
-      middle: "│",
-    },
-  });
-  for (const row of rows) t.push(row.map((cell) => String(cell)));
-  return t.toString();
+  const lines = [head.map((h) => pc.bold(h)), ...rows.map((row) => row.map(String))].map((row) =>
+    row.map((cell) => cell.split("\n")),
+  );
+  const columns = Math.max(0, ...lines.map((row) => row.length));
+  const widths = Array.from({ length: columns }, (_, column) =>
+    Math.max(0, ...lines.flatMap((row) => (row[column] ?? [""]).map((line) => stringWidth(line)))),
+  );
+  const rule = (left: string, mid: string, right: string): string =>
+    `${left}${widths.map((width) => "─".repeat(width + 2)).join(mid)}${right}`;
+  const render = (row: string[][]): string[] => {
+    const height = Math.max(1, ...row.map((cell) => cell.length));
+    return Array.from({ length: height }, (_, index) => {
+      const cells = widths.map((width, column) => {
+        const text = row[column]?.[index] ?? "";
+        return ` ${text}${" ".repeat(width - stringWidth(text))} `;
+      });
+      return `│${cells.join("│")}│`;
+    });
+  };
+  const [header = [], ...body] = lines;
+  return [
+    rule("┌", "┬", "┐"),
+    ...render(header),
+    ...body.flatMap((row) => [rule("├", "┼", "┤"), ...render(row)]),
+    rule("└", "┴", "┘"),
+  ].join("\n");
 }
 
 export function printTable(head: string[], rows: (string | number)[][]): void {
@@ -122,11 +125,33 @@ export function printKeyValues(pairs: [string, string][]): void {
   }
 }
 
-/** CJK characters occupy two terminal columns; naive .length misaligns tables. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching ESC is the point.
+const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
+const ZERO_WIDTH = /[\p{Mn}\p{Me}\p{Cf}]/u;
+const EMOJI = /\p{Emoji_Presentation}/u;
+
+/**
+ * Terminal columns a string occupies. CJK and emoji take two, so naive .length
+ * misaligns tables; colour codes and combining marks take none.
+ */
 export function stringWidth(input: string): number {
+  if (PRINTABLE_ASCII.test(input)) return input.length;
+  const text = input.includes("\x1b") ? input.replace(ANSI_PATTERN, "") : input;
   let width = 0;
-  for (const char of input) {
+  let joined = false;
+  for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
+    // The glyph after a zero-width joiner merges into the preceding emoji.
+    if (joined) {
+      joined = false;
+      continue;
+    }
+    if (code === 0x200d) {
+      joined = true;
+      continue;
+    }
+    if (code < 0x20 || (code >= 0x7f && code < 0xa0) || ZERO_WIDTH.test(char)) continue;
     width +=
       (code >= 0x1100 && code <= 0x115f) ||
       (code >= 0x2e80 && code <= 0xa4cf) ||
@@ -134,7 +159,9 @@ export function stringWidth(input: string): number {
       (code >= 0xf900 && code <= 0xfaff) ||
       (code >= 0xfe30 && code <= 0xfe6f) ||
       (code >= 0xff00 && code <= 0xff60) ||
-      (code >= 0xffe0 && code <= 0xffe6)
+      (code >= 0xffe0 && code <= 0xffe6) ||
+      (code >= 0x20000 && code <= 0x3fffd) ||
+      EMOJI.test(char)
         ? 2
         : 1;
   }

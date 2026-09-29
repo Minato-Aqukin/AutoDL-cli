@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import { formatDuration, parseDuration } from "../core/duration.js";
 import { emit, note, success, warn } from "../output/format.js";
 import { runWorkflow } from "../workflow/run.js";
-import { action } from "./helpers.js";
+import { action, parseNumericFlag } from "./helpers.js";
 
 interface RunCliOptions {
   gpu: string;
@@ -57,27 +57,27 @@ export function registerRunCommand(program: Command): void {
         }
 
         // Ctrl-C must still reach cleanup: abort the in-flight work and let
-        // runWorkflow's finally block power the instance down.
+        // runWorkflow's finally block power the instance down. The handler removes
+        // itself after the first signal so a second Ctrl-C force-quits.
         const controller = new AbortController();
-        let interrupted = false;
-        const onSigint = () => {
-          if (interrupted) return;
-          interrupted = true;
-          warn("收到中断信号，正在安全收尾（实例将被关机）…");
+        const onSignal = (): void => {
+          process.off("SIGINT", onSignal);
+          process.off("SIGTERM", onSignal);
+          warn("收到中断信号，正在安全收尾（实例将被关机）…（再按一次 Ctrl-C 强制退出）");
           controller.abort();
         };
-        process.on("SIGINT", onSigint);
-        process.on("SIGTERM", onSigint);
+        process.on("SIGINT", onSignal);
+        process.on("SIGTERM", onSignal);
 
         try {
           const result = await runWorkflow(context.client, {
             command,
             gpu: options.gpu,
-            gpuNum: Number(options.num),
+            gpuNum: parseNumericFlag(options.num, "num", { integer: true, min: 1 }),
             ...(options.image ? { image: options.image } : {}),
             ...(options.cuda ? { cudaFrom: options.cuda } : {}),
             ...(options.region ? { regions: options.region } : {}),
-            diskGb: Number(options.disk),
+            diskGb: parseNumericFlag(options.disk, "disk", { integer: true, min: 0 }),
             ...(options.name ? { name: options.name } : {}),
             ttlSeconds: parseDuration(options.ttl),
             ...(options.sync ? { sync: options.sync } : {}),
@@ -89,7 +89,7 @@ export function registerRunCommand(program: Command): void {
               : "poweroff") as RunCliOptions["onFinish"],
             ...(options.timeout ? { commandTimeoutMs: parseDuration(options.timeout) * 1000 } : {}),
             ...(options.minBalance !== undefined
-              ? { minBalanceYuan: Number(options.minBalance) }
+              ? { minBalanceYuan: parseNumericFlag(options.minBalance, "min-balance", { min: 0 }) }
               : {}),
             ...(Object.keys(env).length ? { env } : {}),
             signal: controller.signal,
@@ -99,11 +99,17 @@ export function registerRunCommand(program: Command): void {
             note(`用时 ${formatDuration(Math.round(result.durationMs / 1000))}`);
             if (result.exitCode === 0) success("远程命令执行成功");
             else warn(`远程命令退出码 ${result.exitCode}`);
+            if (result.cleanup.error) {
+              warn(
+                `收尾清理未完成：${result.cleanup.error}（实例 ${result.instanceUuid} 可能仍在计费）`,
+              );
+            }
           });
+          if (result.cleanup.error) return 1;
           return result.exitCode ?? 1;
         } finally {
-          process.off("SIGINT", onSigint);
-          process.off("SIGTERM", onSigint);
+          process.off("SIGINT", onSignal);
+          process.off("SIGTERM", onSignal);
         }
       }),
     );

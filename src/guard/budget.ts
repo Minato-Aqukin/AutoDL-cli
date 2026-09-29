@@ -1,7 +1,7 @@
 import { readConfig } from "../config/store.js";
 import type { AutoDLClient } from "../core/client.js";
 import { getBalance } from "../core/endpoints/account.js";
-import { BudgetError } from "../core/errors.js";
+import { BudgetError, UsageError } from "../core/errors.js";
 import { formatYuan } from "../core/money.js";
 import { debug } from "../output/format.js";
 
@@ -9,7 +9,14 @@ import { debug } from "../output/format.js";
 export const DEFAULT_MIN_BALANCE_YUAN = 5;
 
 export function resolveMinBalance(explicit?: number): number {
-  if (explicit !== undefined) return explicit;
+  if (explicit !== undefined) {
+    if (typeof explicit !== "number" || !Number.isFinite(explicit)) {
+      throw new UsageError(`余额阈值必须是有限数字，收到 ${explicit}`, {
+        hint: "例如 --min-balance 5，或 --min-balance 0 显式跳过这道闸门。",
+      });
+    }
+    return explicit;
+  }
   const fromEnv = Number(process.env.AUTODL_MIN_BALANCE);
   if (!Number.isNaN(fromEnv) && process.env.AUTODL_MIN_BALANCE) return fromEnv;
   return readConfig().defaults?.minBalanceYuan ?? DEFAULT_MIN_BALANCE_YUAN;

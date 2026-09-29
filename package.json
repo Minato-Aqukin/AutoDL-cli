@@ -44,7 +44,7 @@
     "dist",
     "!dist/**/*.map",
     "README.md",
-    "README.zh-CN.md",
+    "README.en.md",
     "LICENSE"
   ],
   "scripts": {
@@ -62,23 +62,23 @@
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
-    "@modelcontextprotocol/sdk": "^1.20.0",
-    "cli-table3": "^0.6.5",
+    "@modelcontextprotocol/server": "^2.2.0",
     "commander": "^14.0.0",
-    "ink": "^7.1.1",
     "picocolors": "^1.1.1",
-    "react": "^19.2.8",
     "ssh2": "^1.17.0",
-    "zod": "^3.25.76"
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.0",
     "@changesets/changelog-github": "^1.0.0",
     "@changesets/cli": "^2.29.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@types/node": "^22.15.0",
     "@types/react": "^19.2.18",
     "@types/ssh2": "^1.15.5",
+    "ink": "^7.1.1",
     "ink-testing-library": "^4.0.0",
+    "react": "^19.2.8",
     "tsup": "^8.5.0",
     "typescript": "^5.9.0",
     "vitest": "^3.2.0"

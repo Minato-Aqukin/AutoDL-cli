@@ -24,7 +24,9 @@ import { assertBudget } from "../guard/budget.js";
 import { armTTLOverSSH, composeStartCommand, recordTTL } from "../guard/ttl.js";
 import { debug, isJson, note, success, warn } from "../output/format.js";
 import { t } from "../output/i18n.js";
+import { assertNotAborted } from "../ssh/credentials.js";
 import { type ExecResult, execCommand } from "../ssh/exec.js";
+import { withCleanupFailure } from "./run.js";
 
 /**
  * Deploy a hosted git project onto an AutoDL instance.
@@ -83,6 +85,11 @@ export interface DeployResult {
   access: { publicUrls: string[]; tunnelHint: string | null; logHint: string | null };
   finalAction: "poweroff" | "release" | "keep";
   durationMs: number;
+  /**
+   * What the post-deploy cleanup actually achieved. `finalAction` is the request;
+   * this is the outcome — see `RunResult.cleanup` for why the distinction matters.
+   */
+  cleanup: { stopped: boolean; released: boolean; error: string | null };
 }
 
 /** Where AutoDL's docs say project code belongs: the data disk, not the system disk. */
@@ -130,6 +137,7 @@ async function run(
     capture,
     stdout: isJson() ? process.stderr : process.stdout,
     stderr: process.stderr,
+    ...(options.env ? { env: options.env } : {}),
     ...(options.commandTimeoutMs !== undefined ? { timeoutMs: options.commandTimeoutMs } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
   });
@@ -208,11 +216,14 @@ async function checkout(
 
   const result = await run(client, uuid, command, options, { label: "checkout", capture: true });
   if (result.exitCode !== 0) {
-    throw new UsageError(`拉取仓库失败（退出码 ${result.exitCode}）`, {
+    throw new UsageError(`拉取仓库失败（退出码 ${result.exitCode}，实例 ${uuid}）`, {
       hint: options.gitToken
         ? "确认 token 对该仓库有读权限。"
         : "私有仓库需要 --git-token，或设置 GIT_TOKEN / GITHUB_TOKEN 环境变量。",
-      details: { stderr: redactCredentials(result.stderr).slice(0, 500) },
+      details: {
+        stderr: redactCredentials(result.stderr).slice(0, 500),
+        instanceUuid: uuid,
+      },
     });
   }
   success(`代码已就绪：${dir}`);
@@ -256,23 +267,29 @@ export async function deployWorkflow(
 
   let uuid = options.instanceUuid;
   let created = false;
-
+  /** True when this call powered the box on, so the boot wait is ours to cover. */
+  let booted = false;
   if (uuid) {
-    // Reuse path: this is what "stop, don't release" buys you.
+    // Reuse path: this is what "stop, don't release" buys you. Pre-boot work only;
+    // the wait below runs inside the cleanup try/finally so Ctrl-C during boot
+    // still powers the freshly-started box off.
     const status = await getInstanceStatus(client, uuid);
     if (status !== "running") {
+      // Ctrl-C while checking status must not power on a box nobody will use.
+      assertNotAborted(options.signal);
       note(t("instance.poweringOn"));
       await powerOnInstance(client, uuid, {
         startCommand: composeStartCommand(options.ttlSeconds, undefined) as string,
       });
-      await waitForRunning(client, uuid, {
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+      booted = true;
+      // Track it now: if the boot wait fails, the sweep must still know about it.
+      recordTTL({ uuid, ttlSeconds: options.ttlSeconds, inInstanceTimer: true });
+    } else {
+      const armed = await armTTLOverSSH(client, uuid, options.ttlSeconds);
+      if (!armed) warn(t("guard.armFailed"));
+      recordTTL({ uuid, ttlSeconds: options.ttlSeconds, inInstanceTimer: armed });
+      success(`复用实例 ${uuid}`);
     }
-    const armed = await armTTLOverSSH(client, uuid, options.ttlSeconds);
-    if (!armed) warn(t("guard.armFailed"));
-    recordTTL({ uuid, ttlSeconds: options.ttlSeconds, inInstanceTimer: armed });
-    success(`复用实例 ${uuid}`);
   } else {
     if (!options.gpu) {
       throw new UsageError("必须指定 --gpu（或用 --instance 复用已有实例）", {
@@ -295,6 +312,8 @@ export async function deployWorkflow(
       (input) => assertProCreateRegion(input).id,
     );
 
+    // Ctrl-C during the budget/stock checks must not rent a GPU nobody will use.
+    assertNotAborted(options.signal);
     await assertBudget(client, options.minBalanceYuan);
 
     const regions =
@@ -302,6 +321,8 @@ export async function deployWorkflow(
         ? requestedRegions
         : (await chooseRegions(client, spec, requestedRegions)).regions;
 
+    // Ctrl-C during the (retriable) stock/budget phase must not rent either.
+    assertNotAborted(options.signal);
     note(t("instance.creating"));
     uuid = await createInstance(client, {
       gpuSpec: spec.id,
@@ -323,10 +344,8 @@ export async function deployWorkflow(
       inInstanceTimer: true,
     });
     success(`${t("instance.created")}：${uuid}（TTL ${formatDuration(options.ttlSeconds)}）`);
-
-    note(t("instance.waiting"));
-    await waitForRunning(client, uuid, { ...(options.signal ? { signal: options.signal } : {}) });
-    success(t("instance.ready"));
+    // The boot wait runs inside the try/finally below, so an abort or timeout
+    // during boot still powers the new box off instead of leaking it.
   }
 
   const instanceUuid = uuid;
@@ -336,8 +355,29 @@ export async function deployWorkflow(
   let stdout = "";
   let stderr = "";
   let access: DeployResult["access"] = { publicUrls: [], tunnelHint: null, logHint: null };
+  // Only a confirmed-alive background start may skip cleanup; any earlier failure
+  // (clone, setup, dead start) must still power the instance off.
+  let backgrounded = false;
+  /** Set when the work threw; cleanup still runs before it is rethrown. */
+  let failure: { error: unknown } | undefined;
 
   try {
+    // Both boot waits live here so every exit — Ctrl-C, timeout, `failed` status —
+    // routes through finish() instead of leaking a billing GPU.
+    if (created || booted) {
+      note(t("instance.waiting"));
+      await waitForRunning(client, instanceUuid, {
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+      success(t("instance.ready"));
+    }
+    if (booted) {
+      const armed = await armTTLOverSSH(client, instanceUuid, options.ttlSeconds);
+      if (!armed) warn(t("guard.armFailed"));
+      recordTTL({ uuid: instanceUuid, ttlSeconds: options.ttlSeconds, inInstanceTimer: armed });
+      success(`复用实例 ${instanceUuid}`);
+    }
+
     await checkout(client, instanceUuid, repo, dir, options);
 
     if (!options.noSetup) {
@@ -353,8 +393,9 @@ export async function deployWorkflow(
           { label: "setup", capture: true },
         );
         if (result.exitCode !== 0) {
-          throw new UsageError(`依赖安装失败（退出码 ${result.exitCode}）`, {
+          throw new UsageError(`依赖安装失败（退出码 ${result.exitCode}，实例 ${instanceUuid}）`, {
             hint: "可以用 --setup 指定自定义安装命令，或 --no-setup 跳过后手动处理。",
+            details: { instanceUuid },
           });
         }
         success("依赖安装完成");
@@ -389,14 +430,16 @@ export async function deployWorkflow(
         stderr = result.stderr;
 
         if (result.exitCode !== 0 || result.stdout.includes(DEAD_MARKER)) {
-          throw new UsageError("后台启动失败：进程已退出", {
+          throw new UsageError(`后台启动失败：进程已退出（实例 ${instanceUuid}）`, {
             hint: `完整日志在实例上的 ${dir}/.autodl/start.log`,
             details: {
               log: result.stdout.replace(DEAD_MARKER, "").trim().slice(0, 800),
               stderr: result.stderr.slice(0, 400),
+              instanceUuid,
             },
           });
         }
+        backgrounded = true;
         success("已在后台启动并确认进程存活");
       } else {
         note("正在启动项目…");
@@ -412,17 +455,14 @@ export async function deployWorkflow(
         stderr = result.stderr;
       }
     }
-
-    access = await describeAccess(
-      client,
-      instanceUuid,
-      dir,
-      Boolean(options.detach && options.start),
-    );
-  } finally {
-    await finish(client, instanceUuid, onFinish, Boolean(options.detach && options.start));
+    access = await describeAccess(client, instanceUuid, dir, backgrounded);
+  } catch (err) {
+    failure = { error: err };
   }
+  const cleanup = await finish(client, instanceUuid, onFinish, backgrounded);
+  if (failure) throw withCleanupFailure(failure.error, instanceUuid, cleanup);
 
+  const detached = backgrounded;
   return {
     instanceUuid,
     created,
@@ -430,36 +470,39 @@ export async function deployWorkflow(
     dir,
     setupCommand,
     startCommand,
-    detached: Boolean(options.detach && options.start),
+    detached,
     exitCode,
     stdout,
     stderr,
     access,
     // A detached run deliberately leaves the instance up, so reporting the requested
     // `poweroff` here would be a lie the caller might act on.
-    finalAction: options.detach && options.start ? "keep" : onFinish,
+    finalAction: detached ? "keep" : onFinish,
     durationMs: Date.now() - startedAt,
+    cleanup,
   };
 }
 
 /**
- * Cleanup. Runs in a `finally`, so it must never throw — an exception here would mask
- * the real error and hide the fact that the instance is still burning money.
+ * Cleanup. Runs on every exit path, so it must never throw — an exception here would
+ * mask the real error and hide the fact that the instance is still burning money.
+ *
+ * Returns what was actually achieved; see `finish()` in workflow/run.ts.
  */
 async function finish(
   client: AutoDLClient,
   uuid: string,
   action: "poweroff" | "release" | "keep",
   detached: boolean,
-): Promise<void> {
+): Promise<DeployResult["cleanup"]> {
   if (detached) {
     // Shutting down would kill the very service we just backgrounded.
     warn(`实例 ${uuid} 保持运行中（--detach），用完请关机：autodl stop ${uuid}`);
-    return;
+    return { stopped: false, released: false, error: null };
   }
   if (action === "keep") {
     warn(`实例 ${uuid} 仍在运行（--on-finish keep），记得手动关机：autodl stop ${uuid}`);
-    return;
+    return { stopped: false, released: false, error: null };
   }
 
   note(t("run.cleanup"));
@@ -471,9 +514,10 @@ async function finish(
     }
     success(`实例 ${uuid} 已关机，计费已停止（数据保留，可再次部署复用）`);
   } catch (err) {
-    warn(`自动关机失败：${(err as Error).message}`);
+    const message = (err as Error).message;
+    warn(`自动关机失败：${message}`);
     warn(`请立即手动处理：autodl stop ${uuid}`);
-    return;
+    return { stopped: false, released: false, error: message };
   }
 
   if (action === "release") {
@@ -483,11 +527,14 @@ async function finish(
       await releaseInstance(client, uuid);
       untrackInstance(uuid);
       success(`实例 ${uuid} 已释放`);
+      return { stopped: true, released: true, error: null };
     } catch (err) {
-      warn(`释放失败（实例已关机，不再计费）：${(err as Error).message}`);
+      const message = (err as Error).message;
+      warn(`释放失败（实例已关机，不再计费）：${message}`);
       warn(`稍后可重试：autodl rm ${uuid} --yes`);
+      return { stopped: true, released: false, error: message };
     }
-  } else {
-    untrackInstance(uuid);
   }
+  untrackInstance(uuid);
+  return { stopped: true, released: false, error: null };
 }

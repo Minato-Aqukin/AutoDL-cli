@@ -1,6 +1,5 @@
 import type { Command } from "commander";
 import { toAutoDLError } from "../core/errors.js";
-import { startMcpServer } from "../mcp/server.js";
 import { globalsOf } from "./helpers.js";
 
 export function registerMcpCommand(program: Command): void {
@@ -10,6 +9,8 @@ export function registerMcpCommand(program: Command): void {
     .action(async (_options: unknown, command: Command) => {
       const globals = globalsOf(command);
       try {
+        // Only this command needs the MCP SDK; keep it out of every other command's startup.
+        const { startMcpServer } = await import("../mcp/server.js");
         await startMcpServer({
           ...(globals.token ? { token: globals.token } : {}),
           ...(globals.baseUrl ? { baseUrl: globals.baseUrl } : {}),

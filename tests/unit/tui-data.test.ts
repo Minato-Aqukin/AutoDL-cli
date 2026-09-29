@@ -2,10 +2,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { getTracked, trackInstance } from "../../src/config/state.js";
+import { AutoDLClient } from "../../src/core/client.js";
 import type { Instance, InstanceSnapshot } from "../../src/core/schemas.js";
 import { normalizeSnapshot } from "../../src/core/schemas.js";
-import { buildRow, isLive } from "../../src/tui/data.js";
-import { snapshotResponse } from "../fixtures/responses.js";
+import { buildRow, destroyInstance, isLive, stopInstance } from "../../src/tui/data.js";
+import { mockFetch } from "../fixtures/mock-fetch.js";
+import { emptySuccess, snapshotResponse } from "../fixtures/responses.js";
 
 /**
  * The dashboard's derived columns.
@@ -97,7 +100,6 @@ describe("buildRow", () => {
   });
 
   it("counts down a tracked TTL and goes negative once overdue", async () => {
-    const { trackInstance } = await import("../../src/config/state.js");
     trackInstance({
       uuid: "pro-1",
       ttlSeconds: 7200,
@@ -108,6 +110,102 @@ describe("buildRow", () => {
     expect(buildRow(instance(), undefined, NOW).ttlRemainingMs).toBe(600_000);
     // Past due is what the dashboard paints red — money leaking right now.
     expect(buildRow(instance(), undefined, NOW + 900_000).ttlRemainingMs).toBeLessThan(0);
+  });
+
+  it("prefers an explicit entry over the ledger without reading it again", () => {
+    trackInstance({
+      uuid: "pro-9",
+      ttlSeconds: 7200,
+      expiresAt: NOW + 600_000,
+      createdAt: NOW,
+      inInstanceTimer: true,
+    });
+    const row = buildRow(instance({ uuid: "pro-9" }), undefined, NOW, null);
+    expect(row.ttlRemainingMs).toBeNull();
+    expect(row.ttlSeconds).toBeNull();
+  });
+
+  it("uses an explicit entry as-is for the countdown", () => {
+    const row = buildRow(instance({ uuid: "pro-x" }), undefined, NOW, {
+      uuid: "pro-x",
+      expiresAt: NOW + 1000,
+      ttlSeconds: 60,
+    });
+    expect(row.ttlRemainingMs).toBe(1000);
+    expect(row.ttlSeconds).toBe(60);
+  });
+});
+
+describe("stop/release clear the TTL entry", () => {
+  const STATUS = "/api/v1/dev/instance/pro/status";
+  const POWER_OFF = "/api/v1/dev/instance/pro/power_off";
+  const RELEASE = "/api/v1/dev/instance/pro/release";
+  const statusOk = (value: string) => ({ code: "Success", msg: "", data: value });
+  const client = (fetchImpl: typeof fetch) =>
+    new AutoDLClient({ token: "t", fetchImpl, retryBaseDelayMs: 1 });
+  const tracked = (uuid: string) => ({
+    uuid,
+    ttlSeconds: 7200,
+    expiresAt: NOW + 600_000,
+    createdAt: NOW,
+    inInstanceTimer: true,
+  });
+
+  it("stop drops the entry once the instance has verifiably stopped", async () => {
+    trackInstance(tracked("pro-1"));
+    const fetchMock = mockFetch([
+      { path: POWER_OFF, response: emptySuccess },
+      { path: STATUS, response: statusOk("shutdown") },
+    ]);
+    const result = await stopInstance(client(fetchMock.impl), "pro-1");
+    expect(result.stopped).toBe(true);
+    expect(getTracked("pro-1")).toBeUndefined();
+  });
+
+  it("stop keeps the entry while the instance is still coming up", async () => {
+    // An unverified stop must not disarm the guard: the meter may still run.
+    trackInstance(tracked("pro-1"));
+    const fetchMock = mockFetch([
+      { path: POWER_OFF, response: emptySuccess },
+      { path: STATUS, response: statusOk("starting") },
+    ]);
+    const result = await stopInstance(client(fetchMock.impl), "pro-1");
+    expect(result.stopped).toBe(false);
+    expect(getTracked("pro-1")).toBeDefined();
+  });
+
+  it("release drops the entry after the instance is gone", async () => {
+    trackInstance(tracked("pro-1"));
+    const fetchMock = mockFetch([
+      { path: STATUS, response: statusOk("shutdown") },
+      { path: RELEASE, response: emptySuccess },
+    ]);
+    await destroyInstance(client(fetchMock.impl), "pro-1");
+    expect(fetchMock.callAt(1).body).toEqual({ instance_uuid: "pro-1" });
+    expect(getTracked("pro-1")).toBeUndefined();
+  });
+
+  it("release stops waiting and releases nothing once aborted", async () => {
+    // Quitting the dashboard mid-release: the shutdown wait must end promptly instead
+    // of holding the process for up to ten minutes, and must not release afterwards.
+    const controller = new AbortController();
+    const fetchMock = mockFetch([
+      { path: POWER_OFF, response: emptySuccess },
+      {
+        path: STATUS,
+        response: () => {
+          if (fetchMock.calls.filter((call) => call.url.includes(STATUS)).length === 2) {
+            controller.abort();
+          }
+          return statusOk(fetchMock.calls.length === 1 ? "running" : "shutting_down");
+        },
+      },
+      { path: RELEASE, response: emptySuccess },
+    ]);
+    await expect(
+      destroyInstance(client(fetchMock.impl), "pro-1", { signal: controller.signal }),
+    ).rejects.toThrow("操作已取消");
+    expect(fetchMock.calls.some((call) => call.url.includes(RELEASE))).toBe(false);
   });
 });
 

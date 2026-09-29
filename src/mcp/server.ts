@@ -1,5 +1,5 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer } from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { untrackInstance } from "../config/state.js";
 import { type Context, createContext } from "../context.js";
@@ -27,10 +27,10 @@ import {
   releaseInstance,
 } from "../core/endpoints/instance.js";
 import { toAutoDLError, UsageError } from "../core/errors.js";
-import { resolveGitToken } from "../core/repo.js";
+import { parseRepo, resolveGitToken } from "../core/repo.js";
 import { redactSnapshot } from "../core/schemas.js";
 import { getStockByRegion } from "../core/stock.js";
-import { waitForRunning } from "../core/waiters.js";
+import { waitForRunning, waitForShutdown } from "../core/waiters.js";
 import { assertBudget } from "../guard/budget.js";
 import { armTTLOverSSH, composeStartCommand, recordTTL, sweepExpired } from "../guard/ttl.js";
 import { execCommand } from "../ssh/exec.js";
@@ -101,7 +101,7 @@ export function buildServer(context: Context): McpServer {
     {
       title: "查询账号余额",
       description: "返回 AutoDL 账号的可用余额、代金券余额和累计消费（单位：元）。",
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     tool(async () => {
@@ -115,7 +115,7 @@ export function buildServer(context: Context): McpServer {
     {
       title: "列出实例",
       description: "列出账号下所有实例及其状态。可用 status 过滤，如 running / shutdown。",
-      inputSchema: { status: z.string().optional().describe("按状态过滤，例如 running") },
+      inputSchema: z.object({ status: z.string().optional().describe("按状态过滤，例如 running") }),
       annotations: { readOnlyHint: true },
     },
     tool(async ({ status }: { status?: string }) => {
@@ -130,10 +130,10 @@ export function buildServer(context: Context): McpServer {
       title: "查询实例详情",
       description:
         "返回实例详情与实时 SSH 连接信息。注意：实例每次开关机后 SSH 端口和 root 密码都会变化，务必每次重新调用而不要缓存。",
-      inputSchema: {
+      inputSchema: z.object({
         instance_uuid: z.string().describe("实例 ID，例如 pro-76419909953e"),
         reveal_password: z.boolean().optional().describe("是否返回 root 密码明文，默认脱敏为 ***"),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     tool(
@@ -164,7 +164,7 @@ export function buildServer(context: Context): McpServer {
         "默认带 2 小时 TTL 兜底自动关机——长任务请显式加大 ttl，不要关闭它。",
         "官方 API 没有库存查询接口，无货时会返回 NO_STOCK，换 GPU 规格或地区重试即可。",
       ].join("\n"),
-      inputSchema: {
+      inputSchema: z.object({
         gpu: z.string().describe("GPU 规格，如 4090 / pro6000-p，用 autodl_list_gpu_specs 查看"),
         gpu_num: z.number().int().min(1).max(4).optional().describe("GPU 数量 1-4，默认 1"),
         image: z.string().optional().describe("镜像 UUID，默认 PyTorch 2.0 / CUDA 11.8"),
@@ -173,7 +173,7 @@ export function buildServer(context: Context): McpServer {
         name: z.string().optional().describe("实例名称"),
         ttl: z.string().optional().describe("到期自动关机时长，如 2h / 90m，默认 2h"),
         wait: z.boolean().optional().describe("是否等待实例进入 running，默认 true"),
-      },
+      }),
       annotations: { destructiveHint: false, idempotentHint: false },
     },
     tool(
@@ -243,11 +243,11 @@ export function buildServer(context: Context): McpServer {
     {
       title: "开机",
       description: "启动一台已关机的实例，并可选等待其就绪。开机后 SSH 端口和密码会变化。",
-      inputSchema: {
+      inputSchema: z.object({
         instance_uuid: z.string(),
         ttl: z.string().optional().describe("开机后设置的自动关机时长，默认 2h"),
         wait: z.boolean().optional().describe("是否等待 running，默认 true"),
-      },
+      }),
     },
     tool(async (input: { instance_uuid: string; ttl?: string; wait?: boolean }) => {
       const ttlSeconds = parseDuration(input.ttl ?? DEFAULT_MCP_TTL);
@@ -277,7 +277,7 @@ export function buildServer(context: Context): McpServer {
     {
       title: "关机",
       description: "关闭实例，立即停止计费。数据全部保留，随时可以再次开机。",
-      inputSchema: { instance_uuid: z.string() },
+      inputSchema: z.object({ instance_uuid: z.string() }),
     },
     tool(async ({ instance_uuid }: { instance_uuid: string }) => {
       await powerOffInstance(client, instance_uuid);
@@ -292,10 +292,10 @@ export function buildServer(context: Context): McpServer {
       title: "释放实例（不可逆）",
       description:
         "永久释放实例，所有数据会被清空且无法恢复。必须先关机。需要显式传 confirm=true 才会执行。",
-      inputSchema: {
+      inputSchema: z.object({
         instance_uuid: z.string(),
         confirm: z.boolean().describe("必须显式传 true，确认理解数据将被永久清空"),
-      },
+      }),
       annotations: { destructiveHint: true, idempotentHint: false },
     },
     tool(async ({ instance_uuid, confirm }: { instance_uuid: string; confirm: boolean }) => {
@@ -306,7 +306,12 @@ export function buildServer(context: Context): McpServer {
       }
       const status = await getInstanceStatus(client, instance_uuid);
       if (status !== "shutdown") {
-        await powerOffInstance(client, instance_uuid);
+        // A second power_off on an already-stopping instance is rejected, and a
+        // release before shutdown finishes is rejected too — same as CLI rm.
+        if (status !== "shutting_down") {
+          await powerOffInstance(client, instance_uuid);
+        }
+        await waitForShutdown(client, instance_uuid, { timeoutMs: 10 * 60_000 });
       }
       await releaseInstance(client, instance_uuid);
       untrackInstance(instance_uuid);
@@ -320,13 +325,13 @@ export function buildServer(context: Context): McpServer {
       title: "在实例上执行命令",
       description:
         "通过 SSH 在实例上执行 shell 命令，返回 stdout / stderr / 退出码。每次都会重新获取 SSH 凭证，因此实例重启后依然可用。",
-      inputSchema: {
+      inputSchema: z.object({
         instance_uuid: z.string(),
         command: z.string().describe("要执行的 shell 命令"),
         cwd: z.string().optional().describe("远程工作目录"),
         timeout: z.string().optional().describe("超时时间，如 30m，默认 30m"),
         start_if_stopped: z.boolean().optional().describe("实例未运行时是否自动开机，默认 false"),
-      },
+      }),
     },
     tool(
       async (input: {
@@ -336,9 +341,36 @@ export function buildServer(context: Context): McpServer {
         timeout?: string;
         start_if_stopped?: boolean;
       }) => {
+        // An agent that wakes a stopped box through exec and forgets it leaves a GPU
+        // billing with neither guard layer armed — route through the same TTL path
+        // as autodl_power_on, then exec without a second auto-start. Only a fully
+        // stopped box takes that path: a second power_on on one that is already
+        // starting is rejected, so those are left to getCredentials' own wait.
+        let autoStart = input.start_if_stopped ?? false;
+        if (input.start_if_stopped) {
+          let status = await getInstanceStatus(client, input.instance_uuid).catch(() => null);
+          if (status === "shutting_down") {
+            await waitForShutdown(client, input.instance_uuid, { timeoutMs: 10 * 60_000 });
+            status = "shutdown";
+          }
+          if (status === "shutdown") {
+            const ttlSeconds = parseDuration(DEFAULT_MCP_TTL);
+            await powerOnInstance(client, input.instance_uuid, {
+              startCommand: composeStartCommand(ttlSeconds, undefined) as string,
+            });
+            await waitForRunning(client, input.instance_uuid);
+            const armed = await armTTLOverSSH(client, input.instance_uuid, ttlSeconds);
+            recordTTL({
+              uuid: input.instance_uuid,
+              ttlSeconds,
+              inInstanceTimer: armed,
+            });
+            autoStart = false;
+          }
+        }
         const result = await execCommand(client, input.instance_uuid, input.command, {
           capture: true,
-          autoStart: input.start_if_stopped ?? false,
+          autoStart,
           timeoutMs: parseDuration(input.timeout ?? "30m") * 1000,
           ...(input.cwd ? { cwd: input.cwd } : {}),
         });
@@ -358,14 +390,14 @@ export function buildServer(context: Context): McpServer {
     {
       title: "上传文件到实例",
       description: "通过 SFTP 上传本地文件或目录到实例。目录会自动跳过 .git / node_modules 等。",
-      inputSchema: {
+      inputSchema: z.object({
         instance_uuid: z.string(),
         local_path: z.string().describe("本地文件或目录路径"),
         remote_path: z
           .string()
           .optional()
           .describe("远程目标路径，默认 /root/autodl-tmp/autodl-cli（数据盘）"),
-      },
+      }),
     },
     tool(async (input: { instance_uuid: string; local_path: string; remote_path?: string }) => {
       const remote = input.remote_path ?? "/root/autodl-tmp/autodl-cli";
@@ -379,11 +411,11 @@ export function buildServer(context: Context): McpServer {
     {
       title: "从实例下载文件",
       description: "通过 SFTP 把实例上的文件或目录下载到本地。",
-      inputSchema: {
+      inputSchema: z.object({
         instance_uuid: z.string(),
         remote_path: z.string(),
         local_path: z.string().optional().describe("本地目标目录，默认 ./autodl-output"),
-      },
+      }),
     },
     tool(async (input: { instance_uuid: string; remote_path: string; local_path?: string }) => {
       const local = input.local_path ?? "./autodl-output";
@@ -401,7 +433,7 @@ export function buildServer(context: Context): McpServer {
         "适合“跑一次就走”的任务，无需自己编排生命周期，也不会忘记关机。",
         "注意：这个调用会阻塞到任务结束，请为 ttl 和 timeout 留足余量。",
       ].join("\n"),
-      inputSchema: {
+      inputSchema: z.object({
         command: z.string().describe("要在实例上执行的命令"),
         gpu: z.string().describe("GPU 规格"),
         gpu_num: z.number().int().min(1).max(4).optional(),
@@ -420,7 +452,7 @@ export function buildServer(context: Context): McpServer {
           .enum(["poweroff", "release", "keep"])
           .optional()
           .describe("结束后动作，默认 poweroff"),
-      },
+      }),
       annotations: { destructiveHint: false, idempotentHint: false },
     },
     tool(
@@ -460,6 +492,7 @@ export function buildServer(context: Context): McpServer {
           uploaded: result.uploaded,
           downloaded: result.downloaded,
           final_action: result.finalAction,
+          cleanup: result.cleanup,
           duration_ms: result.durationMs,
         };
       },
@@ -475,10 +508,10 @@ export function buildServer(context: Context): McpServer {
         "注意：数据来自 AutoDL 的「弹性部署 GPU 库存」接口，与 Pro 实例能否创建成功没有官方保证，仅供择优参考——不要据此判定「一定创建不了」。",
         "autodl_create_instance 默认已经自动做了这件事，通常不需要单独调用。",
       ].join("\n"),
-      inputSchema: {
+      inputSchema: z.object({
         gpu: z.string().optional().describe("只看某个 GPU 规格，如 4090 / pro6000-p"),
         regions: z.array(z.string()).optional().describe("地区代码列表，默认查全部"),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     tool(async (input: { gpu?: string; regions?: string[] }) => {
@@ -521,7 +554,7 @@ export function buildServer(context: Context): McpServer {
         "代码放在数据盘 /root/autodl-tmp/<仓库名>（系统盘只有 30G）。GitHub 会自动走学术加速。",
         "detach=true 时会后台启动并让实例保持运行——这种情况下用完必须自己调 autodl_power_off，否则会一直计费。",
       ].join("\n"),
-      inputSchema: {
+      inputSchema: z.object({
         repo: z.string().describe("仓库地址：https://github.com/owner/repo、git@... 或 owner/repo"),
         gpu: z.string().optional().describe("GPU 规格；不传 instance_uuid 时必填"),
         instance_uuid: z.string().optional().describe("复用已有实例（之前部署过并关机的那台）"),
@@ -539,7 +572,7 @@ export function buildServer(context: Context): McpServer {
           .optional()
           .describe("结束动作，默认 poweroff（关机保留数据）"),
         timeout: z.string().optional().describe("单条远程命令超时时间"),
-      },
+      }),
       annotations: { destructiveHint: false, idempotentHint: false },
     },
     tool(
@@ -559,7 +592,7 @@ export function buildServer(context: Context): McpServer {
         on_finish?: "poweroff" | "release" | "keep";
         timeout?: string;
       }) => {
-        const token = resolveGitToken(input.git_token);
+        const token = resolveGitToken(input.git_token, parseRepo(input.repo).host);
         const result = await deployWorkflow(client, {
           repo: input.repo,
           ...(input.gpu ? { gpu: input.gpu } : {}),
@@ -589,10 +622,13 @@ export function buildServer(context: Context): McpServer {
           stderr: result.stderr,
           access: result.access,
           final_action: result.finalAction,
+          cleanup: result.cleanup,
           duration_ms: result.durationMs,
-          note: result.detached
-            ? `实例保持运行中，用完请调用 autodl_power_off("${result.instanceUuid}") 停止计费。`
-            : `实例已关机、数据保留。复用：再次调用本工具并传 instance_uuid="${result.instanceUuid}"。`,
+          note: result.cleanup.error
+            ? `收尾清理未完成（${result.cleanup.error}），实例 ${result.instanceUuid} 可能仍在计费，请手动检查。`
+            : result.detached
+              ? `实例保持运行中，用完请调用 autodl_power_off("${result.instanceUuid}") 停止计费。`
+              : `实例已关机、数据保留。复用：再次调用本工具并传 instance_uuid="${result.instanceUuid}"。`,
         };
       },
     ),
@@ -604,7 +640,7 @@ export function buildServer(context: Context): McpServer {
       title: "列出可用 GPU 规格",
       description:
         "列出官方开放 API 支持的全部 GPU 规格。注意官方没有库存接口，有货与否只能创建时才知道。",
-      inputSchema: {},
+      inputSchema: z.object({}),
       annotations: { readOnlyHint: true },
     },
     tool(async () => ({ gpu_specs: GPU_SPECS, regions: REGIONS })),
@@ -615,9 +651,9 @@ export function buildServer(context: Context): McpServer {
     {
       title: "列出镜像",
       description: "列出官方公共基础镜像，或账号下的私有镜像。",
-      inputSchema: {
+      inputSchema: z.object({
         kind: z.enum(["base", "private"]).optional().describe("默认 base（公共基础镜像）"),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     tool(async ({ kind }: { kind?: "base" | "private" }) => {
@@ -635,7 +671,7 @@ export function buildServer(context: Context): McpServer {
       title: "保存实例为私有镜像",
       description:
         "把实例当前状态保存成可复用的私有镜像。保存过程需要一段时间，之后用 autodl_list_images 查状态。",
-      inputSchema: { instance_uuid: z.string(), image_name: z.string() },
+      inputSchema: z.object({ instance_uuid: z.string(), image_name: z.string() }),
     },
     tool(async ({ instance_uuid, image_name }: { instance_uuid: string; image_name: string }) => ({
       instance_uuid,
@@ -648,7 +684,7 @@ export function buildServer(context: Context): McpServer {
     {
       title: "清理超时实例",
       description: "关闭本机记录中所有已超过 TTL 但仍在运行的实例。用于收尾兜底。",
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     tool(async () => sweepExpired(client)),
   );
