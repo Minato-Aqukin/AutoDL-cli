@@ -1,191 +1,173 @@
 # autodl-cli
 
-> **Unofficial.** This project is not affiliated with, endorsed by, or sponsored by AutoDL.
-> "AutoDL" is used only to identify the platform this tool talks to.
+> **非官方项目。** 本项目与 AutoDL 官方无任何关联，未获其背书或赞助。
+> 名称中的 "AutoDL" 仅用于指代本工具所对接的平台。
 
-Manage [AutoDL](https://www.autodl.com/) GPU instances from the command line — and let
-your coding agent do it too.
+用命令行管理 [AutoDL](https://www.autodl.com/) GPU 实例 —— 并且让你的 AI agent 也能管。
 
-Built on AutoDL's **official open API**, so the developer token stays valid indefinitely
-and nothing breaks when the web console is redesigned.
+基于 AutoDL **官方开放 API** 构建：开发者 Token 长期有效，网页控制台改版也不会导致工具失效。
 
-[简体中文](./README.zh-CN.md)
+[English](./README.en.md)
 
 ---
 
-## Why
+## 为什么做这个
 
-When an AI agent needs a GPU box mid-task, it has no way to get one: AutoDL's instances
-are created by clicking through a web console. This gives the agent three ways in, all
-backed by the same core:
+当 AI agent 在执行任务途中需要一台 GPU 机器时，它没有任何办法拿到 —— AutoDL 的实例只能在网页
+控制台点出来。本项目提供三个入口，共用同一套核心逻辑：
 
-| Entry point | For | How |
+| 入口 | 面向 | 用法 |
 |---|---|---|
-| **CLI** | humans | `autodl create --gpu 4090 --ttl 2h` |
-| **MCP server** | Claude Code, Cursor, Cline, … | `autodl mcp` over stdio |
-| **SDK** | Node programs | `import { createInstance } from "@minato-aqukin/autodl-cli"` |
+| **CLI** | 人 | `autodl create --gpu 4090 --ttl 2h` |
+| **MCP server** | Claude Code、Cursor、Cline… | `autodl mcp`（stdio） |
+| **SDK** | Node 程序 | `import { createInstance } from "@minato-aqukin/autodl-cli"` |
 
-Every command speaks `--json` with a stable schema and a documented exit code, so an
-agent can branch on the result without parsing prose.
+每个命令都支持 `--json`，输出结构稳定、退出码有明确语义，agent 无需解析自然语言就能判断结果。
 
-## Install
+## 安装
 
 ```bash
-npm install -g @minato-aqukin/autodl-cli   # then: autodl <command>
-npx @minato-aqukin/autodl-cli <command>    # or without installing
+npm install -g @minato-aqukin/autodl-cli   # 之后直接用 autodl 命令
+npx @minato-aqukin/autodl-cli <command>    # 或者不安装直接用
 ```
 
-Requires Node.js 22+.
+需要 Node.js 22 及以上。
 
-## The dashboard
+## 交互式看板
 
 ```bash
-autodl tui     # or just `autodl` in an interactive terminal
+autodl tui     # 交互式终端里直接敲 autodl 也进
 ```
 
-On a machine with no token yet it opens on a login screen offering two things —
-configure a token, or quit. Paste the token, it is verified against the API before
-being saved, and you land on the dashboard. Once configured, `autodl` goes straight in.
+还没配置 Token 的机器上，它会先进登录页，给两个选项——配置 Token 登入，或退出。
+粘贴 Token 后会先向 API 验证再保存，然后直接进看板。已经配置过的，敲 `autodl` 直接进。
 
-A live table of your instances: status, GPU, region, **how long each has been powered on
-and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
-detail, `s` start, `x` stop, `ctrl+d` release, `g` stock,
-`r` refresh, `ctrl+l` log out, `?` help, `q` quit. Release and logout require confirmation.
-The detail screen (`Enter`) owns the per-instance keys: `h` automatically authenticated
-SSH, `f` files, `t` transfers, `c` copy the SSH command, `n` new instance.
+一张会自己刷新的实例表：状态、GPU、地区、**已开机多久、大概花了多少钱**、TTL 还剩多少。
+快捷键：`↑↓` 移动、`Enter` 详情、`s` 开机、`x` 关机、`ctrl+d` 释放、`g` 库存、
+`r` 刷新、`ctrl+l` 退出登录、`?` 帮助、`q` 退出。释放和退出登录需要确认。
+详情页（`Enter` 进入）里还有实例级操作：`h` 自动认证 SSH、`f` 文件管理、
+`t` 传输队列、`c` 复制 SSH 命令、`n` 新建实例。
 
-`ctrl+d` release wipes the instance permanently, which is why it is not a bare `d`.
+`ctrl+d` 释放会永久清空实例，所以它不是单个 `d`。
 
-`ctrl+l` clears the saved token and returns to the login screen, after a confirmation — and
-it says so when `AUTODL_TOKEN` or `--token` will outrank whatever you save next. If the
-API rejects the token while the dashboard is open — expired, reset, verification lapsed —
-polling stops and the same login screen is one keystroke away, rather than leaving a
-frozen table above an endless stream of 401s.
-Re-login keeps the same token precedence: `--token` › `AUTODL_TOKEN` › saved token.
-Saving a different token does not switch accounts while an override is active. If that
-override is invalid, remove or update it and restart the TUI; it will not silently fall
-back to the saved account. Authentication failures from GPU stock queries also end the session.
+`ctrl+l` 会在二次确认后清除本地 Token 并回到登录页；如果本次会话的 Token 来自 `AUTODL_TOKEN`
+或 `--token`，确认框会直说它的优先级高于接下来保存的 Token。看板开着时 Token 失效了
+（过期、被重置、实名状态变化），刷新会立刻停下，并给出一个回登录页的入口——
+而不是让你对着一张不再更新的表和刷不完的 401。
+重新登录也遵守 `--token` › `AUTODL_TOKEN` › 本地 Token 的优先级。有覆盖项时，
+保存另一个 Token 不会切换账号；覆盖项失效时需要修改或移除它并重启 TUI，不会悄悄
+改用刚保存的账号。库存查询遇到认证失败时也会结束当前会话。
 
-It fills the terminal and shows your account id and balance in the header. Copying with
-`c` puts only the SSH command on the clipboard — never the root password, which any
-process could then read. Where no clipboard helper exists (SSH sessions, containers) it
-falls back to OSC 52 and says so, since the terminal never confirms.
+界面占满终端，头部显示账号 ID 与余额。`c` 只把 **SSH 命令**写进剪贴板，**不含 root 密码**
+——剪贴板任何进程都能读。没有剪贴板工具的环境（SSH 会话、容器）会退回 OSC 52 并如实说明，
+因为终端不会回应是否成功。
 
-It runs on the terminal's alternate screen, so it owns a fixed canvas instead of
-scrolling below whatever was already there, and quitting restores your prompt and
-scrollback untouched.
+它跑在终端的备用屏上，因此拥有一块固定画布，不会接在之前的残留输出后面滚动；
+退出时会完整还原你的提示符和滚动历史。
 
-It exists because AutoDL bills on power state: the expensive mistake is not a wrong
-command, it's an instance nobody remembered to stop. Leaving this open makes that visible.
+做它的理由很简单：AutoDL 按开机时长计费，最贵的错误不是敲错命令，而是"忘了还开着"。
+把这张表开着，这件事就一直是可见的。
 
-Two deliberate honesty constraints. A rate is only knowable from a **running** instance's
-snapshot, so a stopped instance shows elapsed time and no money — inventing a number
-would be worse than showing none. And while a rate is still loading the total says so
-rather than quietly under-reporting.
-Account runway stays pending until every running instance's rate is known; an unknown
-rate is never treated as free compute. On short terminals, including 80×24, the resource
-and billing panels are hidden when their stacked layout would obscure the instance list
-or keyboard hints.
+有两处刻意的诚实约束。单价只能从**运行中**实例的 snapshot 拿到，所以已关机的实例
+只显示时长、不显示金额——编一个看起来合理的数字比留空更糟。单价还没拉到时，
+汇总栏会明说"总额偏低"，而不是安静地少报。
+账号续航会等所有运行实例的单价齐全后才给出时长，不会把未知单价当成免费。
+终端高度不足时（包括 80×24），资源和计费面板会让位给实例列表和按键提示；
+窄屏上下堆叠所占的高度也会计入判断。
 
-The TUI never runs in a pipe, in CI, or under `--json`: it exits with code 2 and an
-explanation instead of taking over a terminal that isn't there. A bare `autodl` outside
-an interactive terminal still prints help exactly as before.
+TUI 不会在管道、CI 或 `--json` 下启动：它会以退出码 2 退出并说明原因，
+而不是去接管一个并不存在的终端。非交互环境下裸 `autodl` 仍然和以前一样打印帮助。
 
-### SSH and file management
+### SSH 和文件管理
 
-Open the detail screen (`Enter`) and press `h`: it hands the entire terminal to a
-password-authenticated SSH session and restores the dashboard on exit or disconnect;
-this is not an embedded terminal. Credentials are
-fetched live and never placed in command arguments, logs, or transfer records.
-The CLI equivalent is `autodl ssh <id> --auto-auth`. This mode uses ssh2, not OpenSSH
-configuration. Keep using ordinary `autodl ssh <id>` for `~/.ssh/config`, agents and
-forwarding such as `-L`. The implementation uses cross-platform Node.js terminal and
-filesystem interfaces for Linux, macOS and native Windows; sshpass is not required.
+先 `Enter` 进详情页再按 `h`，它会临时交出整个终端，用实时实例密码建立 SSH 会话；
+退出或断线后返回看板，不是看板内嵌入终端。
+也可运行 `autodl ssh <id> --auto-auth`。自动认证模式使用 ssh2，不读取 OpenSSH 配置；
+需要 `~/.ssh/config`、agent 或 `-L` 转发时，继续使用普通 `autodl ssh <id>`。
+实现使用 Node.js 的跨平台终端和文件接口，无需安装 sshpass；支持 Linux、macOS 和原生 Windows。
 
-On the detail screen, `f` opens local/remote panes; narrow terminals show the active pane. `Tab` switches
-sides, arrows and Enter navigate, Space selects multiple entries, and `a` selects all.
-`g` accepts a directory path; `p` accepts source/destination paths directly.
-`u` transfers the selection to the opposite pane after confirming direction.
-`m` creates directories, `r` renames or moves within one side, and `x` permanently
-deletes after confirmation. `Q` opens the queue; Esc returns.
+详情页按 `f` 打开本地/远端双栏，窄屏显示活动侧，`Tab` 切换。文件操作：
 
-Relative paths resolve against their corresponding pane. Selected source basenames
-are preserved: copying `project` into `/root/work` produces `/root/work/project`.
-The browser transfers explicitly selected directory contents, without the legacy
-`push` command's ignore rules. Symlinks and special files are skipped; queue details
-offer `v` to browse every skipped entry.
+| 按键 | 操作 |
+|---|---|
+| `↑↓`、`Enter`、`←` | 选择、进入目录、返回父目录 |
+| `Space` / `a` | 多选 / 全选或清空 |
+| `g` / `p` | 跳转路径 / 直接输入传输来源和目标目录 |
+| `u` | 把选中项传到对侧目录，确认方向后加入队列 |
+| `s` / `c` | 切换单向增量同步 / 内容校验 |
+| `m` / `r` / `x` | 新建目录 / 改名或同端移动 / 确认后永久删除 |
+| `Q` / `Esc` | 查看队列 / 返回 |
 
-Ordinary conflicts pause for `o` overwrite, `s` skip, or `b` keep both; `a` applies the
-choice to remaining conflicts in this task. Toggle `s` in the browser to synchronize
-one way: skip unchanged files, replace changed files in full, and **never delete
-destination-only files**. Size/mtime comparison is the default; `c` enables SHA-256
-comparison. Checksumming reads both files; remote contents are streamed over SFTP,
-so strict checking can cost as much bandwidth as downloading the files.
+相对路径以对应侧当前目录为基准。每个选中来源的文件名或目录名保留在目标目录下：
+例如把本地 `project` 传到远端 `/root/work`，结果是 `/root/work/project`。
+文件管理器传输明确选中的目录内容，不套用旧 `push` 命令的忽略规则；
+符号链接及特殊文件跳过，队列详情按 `v` 可逐项查看全部跳过记录。
 
-The session queue is serial, with byte progress, speed, cancellation (`c`), details
-(Enter), and manual resume (`r`). Recoverable transport failures have bounded retries;
-authentication failures and powered-off instances pause instead. Starting a stopped
-instance to open SSH/files or resume a task always requires a billing confirmation.
-Automatic reconnect never powers an instance on.
-The file view holds one browsing connection for list/mkdir/rename/remove; directory
-contents are always read live, a dead connection reconnects on the next operation,
-and leaving the view releases it.
-The CLI `files` and `queue` commands share the same queue records: a task added via
-`queue add` can be confirmed and resumed from the dashboard, and vice versa.
+普通传输遇到同名文件会暂停询问：`o` 覆盖、`s` 跳过、`b` 保留两份，
+`a` 切换对本任务其余冲突应用同一选择。同步则以所选方向的来源为准：
+跳过未变化文件，整份替换变化文件，**不删除目标端独有文件**。
+默认比较大小和修改时间；可开启 SHA-256 内容校验，但需要读取两端文件内容，
+远端校验会通过 SFTP 读取数据，因此严格校验可能消耗与下载相当的带宽。
 
-Transfers write same-directory `.autodl-*.part` files and commit only after completion,
-preserving existing destinations on interruption. Resume validates the source version
-and partial prefix, restarting changed/corrupt files. Remote replacement requires the
-OpenSSH atomic-rename extension; unsupported servers fail without deleting the old file.
-Credential-free records live under the config directory's `transfers/`, scoped by
-account and API endpoint. Exit/logout pauses unfinished work. Restored tasks require
-manual resume: **nothing runs in the background after exit**. Only one process may
-mutate an account's queue; dead-process ownership claims are recoverable.
-Cancelled tasks retain partial data; remove their `.part` files and local checkpoints
-only when you no longer need to resume them.
+队列按顺序执行，显示字节进度、速度和状态。可返回看板继续操作；
+在队列按 `Enter` 看详情、`c` 取消、`r` 恢复已暂停或已取消任务。
+网络中断有界重试；实例关机或认证失败会暂停，不自动开机。
+文件页打开后只建立一条浏览连接，切目录、建目录、改名、删除都复用它；
+目录内容每次实时读取，连接断了下次操作自动重连，离开文件页即释放。
+CLI 的 `files` 和 `queue` 命令与看板共用同一队列记录：
+`queue add` 进去的任务能在看板 `t` 里确认冲突和恢复，反之亦然。
+`queue resume`、`queue resolve` 和 `queue add --wait` 会在前台执行任务，未完成时以非零退出码结束。
+
+未完成文件写入目标目录里的 `.autodl-*.part`，完成后才替换目标，取消不会截断原文件。
+续传会验证来源版本及已传前缀；来源变化或临时文件损坏时重新传输。
+覆盖远端文件需要服务器的 OpenSSH 原子重命名扩展；不支持时保留原文件并报错。
+任务记录位于配置目录的 `transfers/`，按账号和 API 地址隔离，不保存凭证。
+退出/退出登录会暂停任务；下次进入队列后手动恢复，**退出后不后台传输**。
+同一账号队列只允许一个进程写入，崩溃遗留的所有权记录可自动回收。
+取消会保留续传文件；确定不再恢复时可删除对应任务的 `.part` 和本地续传记录。
 
 
-## Setup
+## 配置
 
-The official API needs a developer token from an **identity-verified** account
-(个人或企业实名认证). Get it from the AutoDL console → 设置 → 开发者 Token.
+官方 API 需要**已完成实名认证**（个人或企业）账号的开发者 Token。
+获取路径：AutoDL 控制台 → 设置 → 开发者 Token。
 
 ```bash
-autodl login              # verifies the token, then saves it with 0600 permissions
-autodl account            # balance, vouchers, lifetime spend
+autodl login              # 先验证 Token 有效，再以 0600 权限落盘
+autodl account            # 查看余额、代金券、累计消费
 ```
 
-Token precedence: `--token` › `AUTODL_TOKEN` › `~/.config/autodl-cli/config.json`.
+Token 优先级：`--token` › `AUTODL_TOKEN` 环境变量 › `~/.config/autodl-cli/config.json`。
 
-## Quick start
+## 快速上手
 
 ```bash
-# Rent a GPU that shuts itself off after two hours, and wait until it's ready
+# 租一台两小时后自动关机的卡，并等它就绪
 autodl create --gpu 4090 --ttl 2h --wait
 
-# Work with it
+# 开始干活
 autodl ls
-autodl ssh pro-76419909953e                    # interactive login
-autodl exec pro-76419909953e "nvidia-smi"      # one-off command, remote exit code
-autodl push pro-76419909953e ./src /root/work  # SFTP upload
-autodl pull pro-76419909953e /root/work/out .  # SFTP download
+autodl ssh pro-76419909953e                    # 交互式登录
+autodl exec pro-76419909953e "nvidia-smi"      # 单次执行，透传远程退出码
+autodl push pro-76419909953e ./src /root/work  # SFTP 上传
+autodl pull pro-76419909953e /root/work/out .  # SFTP 下载
 
-# Stop paying
+# 停止计费
 autodl stop pro-76419909953e
-autodl rm pro-76419909953e --yes               # irreversible: wipes all data
+autodl rm pro-76419909953e --yes               # 不可逆：数据将被永久清空
 ```
 
-Or do the whole thing in one verb:
+也可以用一条命令跑完全流程：
 
 ```bash
 autodl run "python train.py" \
   --gpu 4090 --sync ./ --pull /root/autodl-cli/checkpoints --ttl 4h
 ```
 
-That creates an instance, waits for it, uploads your code, streams the command's output,
-downloads the results, and powers the instance off — including on Ctrl-C.
+它会自动建实例 → 等就绪 → 上传代码 → 流式输出执行过程 → 回传产物 → 关机。
+按 Ctrl-C 中断时同样会走完关机流程。
 
-## Use it from an agent
+## 接入 agent
 
 ### Claude Code
 
@@ -193,7 +175,7 @@ downloads the results, and powers the instance off — including on Ctrl-C.
 claude mcp add autodl -- npx -y @minato-aqukin/autodl-cli mcp
 ```
 
-### Cursor / Cline / any MCP client
+### Cursor / Cline / 任意 MCP 客户端
 
 ```json
 {
@@ -201,21 +183,20 @@ claude mcp add autodl -- npx -y @minato-aqukin/autodl-cli mcp
     "autodl": {
       "command": "npx",
       "args": ["-y", "@minato-aqukin/autodl-cli", "mcp"],
-      "env": { "AUTODL_TOKEN": "your-token" }
+      "env": { "AUTODL_TOKEN": "你的Token" }
     }
   }
 }
 ```
 
-Tools exposed: `autodl_account_info`, `autodl_list_instances`, `autodl_get_instance`,
-`autodl_create_instance`, `autodl_power_on`, `autodl_power_off`,
-`autodl_release_instance`, `autodl_exec`, `autodl_upload`, `autodl_download`,
-`autodl_run`, `autodl_list_gpu_specs`, `autodl_list_images`, `autodl_save_image`,
-`autodl_sweep_expired`. Plus an `autodl://instances` resource.
+提供的工具：`autodl_account_info`、`autodl_list_instances`、`autodl_get_instance`、
+`autodl_create_instance`、`autodl_power_on`、`autodl_power_off`、
+`autodl_release_instance`、`autodl_exec`、`autodl_upload`、`autodl_download`、
+`autodl_run`、`autodl_list_gpu_specs`、`autodl_list_images`、`autodl_save_image`、
+`autodl_sweep_expired`，另有 `autodl://instances` 资源。
 
-MCP defaults are deliberately stricter than the CLI's, because nobody is watching:
-a 2-hour TTL is applied unless you ask for longer, releasing requires an explicit
-`confirm: true`, and passwords come back redacted unless requested.
+MCP 模式的默认值比 CLI 更严格，因为没有人在旁边盯着：不指定时强制套用 2 小时 TTL，
+释放实例必须显式传 `confirm: true`，密码默认脱敏返回。
 
 ### Shell / CI
 
@@ -223,160 +204,154 @@ a 2-hour TTL is applied unless you ask for longer, releasing requires an explici
 autodl ls --json | jq -r '.data[] | select(.status=="running") | .uuid'
 ```
 
-## Deploying a git project
+## 部署 git 项目
 
 ```bash
-# Rent a box, clone, auto-install dependencies, run it, then stop the instance
+# 开一台卡，拉代码、自动装依赖、跑起来，然后关机
 autodl deploy owner/repo --gpu 4090 --start "python train.py" --ttl 4h
 
-# Long-running service: background it and keep the instance up
+# 长驻服务：后台启动并保持实例运行
 autodl deploy owner/repo --gpu 4090 --start "python app.py" --detach
 
-# Come back later — powers the same box on and `git pull`s, no rebuild
+# 过几天回来：同一台机器开机 + git pull，环境不用重建
 autodl deploy owner/repo --instance pro-76419909953e --start "python train.py"
 ```
 
-`deploy` differs from `run` in one deliberate way: it **stops** the instance at the end
-instead of releasing it. A stopped instance keeps its disks, so the next deploy reuses
-the environment you already built. `--on-finish release` opts out.
+`deploy` 和 `run` 只有一个刻意的区别：结束时**关机而不释放**。关机的实例磁盘完整保留，
+下次部署直接复用已经装好的环境。想释放用 `--on-finish release`。
 
-Code lands in `/root/autodl-tmp/<repo>` — the data disk. AutoDL's system disk is a fixed
-30GB that also gets packed into any saved image; the data disk is separate, faster and
-expandable. The trade-off worth knowing: **data-disk contents are not included when you
-save an image**, so put the environment on the system disk and the code here.
+代码放在 `/root/autodl-tmp/<仓库名>`，也就是**数据盘**。AutoDL 的系统盘固定 30G 且会被打包进
+保存的镜像；数据盘独立、更快、可扩容。有个值得知道的取舍：**数据盘的内容保存镜像时不包含**，
+所以环境装系统盘、代码放数据盘才是对的组合。
 
-Dependencies are auto-detected in this order, first hit wins — `environment.yml` →
-`requirements.txt` → `pyproject.toml` → `package-lock.json`/`package.json`. Override with
-`--setup "<cmd>"`, or skip with `--no-setup`.
+依赖按这个顺序自动探测，先命中先用：`environment.yml` → `requirements.txt` →
+`pyproject.toml` → `package-lock.json`/`package.json`。`--setup "<命令>"` 可完全覆盖，
+`--no-setup` 跳过。
 
-Remote commands run through a **login shell**. AutoDL images keep `python`, `pip` and
-`conda` in `/root/miniconda3/bin`, which only reaches `PATH` via the login profile — a
-plain non-interactive `ssh host "pip install ..."` exits 127. This applies to
-`autodl exec` too, so it behaves the way it does when you `autodl ssh` in by hand.
+远程命令一律走**登录 shell**。AutoDL 镜像把 `python`、`pip`、`conda` 放在
+`/root/miniconda3/bin`，这个路径只有登录时的 profile 才会加进 `PATH`——直接
+`ssh host "pip install ..."` 会以退出码 127 失败。`autodl exec` 同样如此，
+因此它的行为和你手动 `autodl ssh` 进去敲命令一致。
 
-Cloning from GitHub or HuggingFace automatically enables AutoDL's academic proxy
-(`source /etc/network_turbo`). Gitee is domestic and skips it. `--no-accel` disables it.
-AutoDL notes the proxy is "for academic use, with no stability guarantee".
+从 GitHub / HuggingFace 拉代码时会自动开启学术资源加速（`source /etc/network_turbo`）。
+Gitee 是境内的，不需要也不会开。`--no-accel` 可关闭。官方注明该加速「仅供学术用途、不保证稳定」。
 
-Private repos: `--git-token`, or `GIT_TOKEN` / `GITHUB_TOKEN` in the environment. The
-token never reaches a log line, an error message, `--json` output, or the checkout's
-stored git remote.
+私有仓库用 `--git-token`，或设置环境变量：`GIT_TOKEN` 适用于任意主机，`GITHUB_TOKEN` 只用于
+github.com，`GITEE_TOKEN` 只用于 gitee.com，GitHub 的 Token 不会被发给其他主机。凭证不会出现在
+日志、错误信息、`--json` 输出里，也不会留在实例内 git remote 的配置中。
 
-## Checking GPU stock
+## 查 GPU 库存
 
 ```bash
-autodl stock --gpu 4090        # where are the free cards
-autodl stock                   # everything, everywhere
+autodl stock --gpu 4090        # 哪里有空闲卡
+autodl stock                   # 全部地区全部型号
 ```
 
-**Read this table carefully — the numbers are less authoritative than they look.** They
-come from AutoDL's elastic-deployment stock endpoint, the only capacity API that exists,
-and it does not track Pro instance availability. Measured on 2026-08-23: it reported 140
-idle RTX 4090D in `westDC3` while creating a Pro instance there answered *"暂无库存"* —
-and the identical request with no region constraint succeeded, landing in `beijingDC2`.
+**这张表要谨慎看——数字没有它看上去那么权威。** 它来自 AutoDL 的「弹性部署 GPU 库存」接口，
+这是唯一存在的容量接口，但它**不反映 Pro 实例的可用量**。2026-08-23 实测：接口显示
+`westDC3` 有 140 张空闲 RTX 4090D，而在该地区创建 Pro 实例返回*「暂无库存」*；同样的请求
+不带地区限制反而成功了，最终落在 `beijingDC2`。
 
-Two consequences, both baked into the tool:
+由此得出两个结论，都已经写进工具的行为里：
 
-- **Creating an instance never narrows regions on its own.** Omitting `data_center_list`
-  gives AutoDL the widest choice, which empirically succeeds most often.
-- **Only two regions accept a Pro instance at all**: `westDC3` (西北B区) and `beijingDC2`
-  (北京B区). The other nine in the stock table are elastic-deployment only; passing one
-  to `--region` is rejected up front rather than failing later with AutoDL's opaque
-  "请求参数错误". The `可建Pro` column marks which is which.
+- **创建实例时不会自作主张缩小地区范围。** 不传 `data_center_list` 让 AutoDL 自行调度，
+  实测成功率最高。
+- **只有两个地区能创建 Pro 实例**：`westDC3`（西北B区）和 `beijingDC2`（北京B区）。
+  库存表里另外 9 个地区只用于弹性部署，写进 `--region` 会被提前拒绝，而不是等到 AutoDL
+  回一句含糊的「请求参数错误」。表里的 `可建Pro` 列标明了这个区别。
 
-## The cost guard
+## 成本护栏
 
-**AutoDL bills purely on power state.** An instance that finished training an hour ago
-costs exactly as much as one at 100% utilisation. This is the single easiest way for an
-unattended agent to waste real money, so the protection is built in rather than optional.
+**AutoDL 只按开机时长计费，与是否使用 GPU 无关。** 一台一小时前就跑完训练的实例，
+和一台满载运行的实例，花的钱一模一样。这是无人值守的 agent 最容易烧钱的地方，
+所以护栏是内建的，而不是可选项。
 
-Three layers:
+三道防线：
 
-1. **Inside the instance.** `--ttl 2h` arms a detached `sleep && shutdown` on the box
-   itself via `start_command`. It fires even if this CLI is killed, your laptop sleeps,
-   or the network dies. This is the layer that actually protects your wallet.
-2. **A local ledger.** Every command opportunistically sweeps instances past their TTL
-   and powers them off. Catches the cases layer 1 can't — a `start_command` that
-   silently failed, or a manual power-on with no fresh timer.
-3. **Idle detection.** `autodl guard idle <id>` samples GPU utilisation over SSH and
-   shuts down after a sustained lull.
+1. **实例内定时器。** `--ttl 2h` 会通过 `start_command` 在机器内部埋一个后台
+   `sleep && shutdown`。即使 CLI 被杀、笔记本合盖、网络断掉，它照样会触发。
+   真正保住钱包的是这一层。
+2. **本地台账。** 每次执行任何命令时顺手扫一遍，发现超过 TTL 仍在运行的实例就关掉。
+   用于兜住第一道防线覆盖不到的情况 —— 比如 `start_command` 静默失败，
+   或者实例被手动开机但没有重新设置定时器。
+3. **闲置检测。** `autodl guard idle <id>` 通过 SSH 采样 GPU 利用率，持续闲置后自动关机。
 
 ```bash
-autodl guard ttl pro-xxx 2h     # arm/re-arm on a running instance
-autodl guard cancel pro-xxx     # disarm
-autodl guard list               # what this machine is tracking
-autodl guard sweep              # reclaim everything past its TTL now
+autodl guard ttl pro-xxx 2h     # 给运行中的实例设置/重设定时关机
+autodl guard cancel pro-xxx     # 取消（同时清除本机台账；无法确认实例内定时器已停止时退出码为 1）
+autodl guard list               # 查看本机台账
+autodl guard sweep              # 立即清理所有超时实例
 autodl guard idle pro-xxx --threshold 5 --samples 6 --interval 1m
 ```
 
-A **balance gate** also refuses to create an instance when your wallet is below
-`--min-balance` (default ¥5). AutoDL doesn't reclaim instances the moment the balance
-hits zero — it keeps them to protect your data — so a low balance turns into a stuck,
-unusable instance rather than a clean failure.
+另外还有**余额闸门**：账号可用余额低于 `--min-balance`（默认 ¥5）时直接拒绝创建实例。
+因为 AutoDL 在余额归零时并不会立刻回收实例（平台优先保数据），
+余额不足的结果往往不是干净地失败，而是留下一台卡住、用不了的实例。
 
-## The agent contract
+## Agent 契约
 
-Stable across minor versions. Breaking changes require a major.
+在次版本之间保持稳定，破坏性变更走主版本。
 
-**stdout in `--json` mode is pure JSON.** Progress, prompts and warnings all go to
-stderr, so `autodl ... --json | jq` is always safe.
-Unknown commands, unknown options and missing arguments use exit code 2 with a `USAGE`
-error, including a JSON error object when `--json` is enabled. `tui --json` follows the
-same error contract; explicit help and version requests still print their normal text.
+**`--json` 模式下 stdout 是纯 JSON。** 进度、提示、警告一律走 stderr，
+所以 `autodl ... --json | jq` 永远安全。
+未知命令、未知选项和缺少参数统一返回退出码 2、`USAGE` 错误；启用 `--json` 时
+也会输出一个 JSON 错误对象。`tui --json` 同样遵守错误输出契约；显式请求帮助或
+版本号仍输出原来的文本。
 
 ```jsonc
-// success
+// 成功
 { "ok": true, "data": { /* ... */ } }
 
-// failure
+// 失败
 { "ok": false, "error": { "code": "NO_STOCK", "message": "…", "hint": "…", "requestId": "…" } }
 ```
 
-| Exit | Meaning | Error codes |
+| 退出码 | 含义 | 对应 error code |
 |---:|---|---|
-| 0 | Success | — |
-| 1 | Generic failure | `GENERIC`, `API_ERROR`, `NETWORK` |
-| 2 | Bad arguments | `USAGE` |
-| 3 | Token missing or invalid | `AUTH_MISSING`, `AUTH_INVALID` |
-| 4 | Resource not found | `NOT_FOUND` |
-| 5 | Out of budget / blocked by a guard | `INSUFFICIENT_BALANCE`, `GUARD_BLOCKED` |
-| 6 | No GPU stock | `NO_STOCK` |
-| 7 | Timed out | `TIMEOUT` |
-| 8 | SSH failure | `SSH_FAILED` |
+| 0 | 成功 | — |
+| 1 | 通用错误 | `GENERIC`、`API_ERROR`、`NETWORK` |
+| 2 | 参数错误 | `USAGE` |
+| 3 | Token 缺失或无效 | `AUTH_MISSING`、`AUTH_INVALID` |
+| 4 | 资源不存在 | `NOT_FOUND` |
+| 5 | 余额不足 / 被护栏拦截 | `INSUFFICIENT_BALANCE`、`GUARD_BLOCKED` |
+| 6 | GPU 无库存 | `NO_STOCK` |
+| 7 | 超时 | `TIMEOUT` |
+| 8 | SSH 失败 | `SSH_FAILED` |
 
-`autodl exec` and `autodl run` instead exit with the **remote** command's exit code, so
-`autodl exec box "make test" && deploy` behaves the way you'd expect.
+`autodl exec` 和 `autodl run` 例外：它们透传**远程命令**的退出码，
+这样 `autodl exec box "make test" && deploy` 才符合直觉。唯一的例外是 `run`/`deploy`
+结束后未能关机或释放实例：此时退出码为 1，并在 `data.cleanup.error` 中说明，因为这台实例可能仍在计费。
 
-## Commands
+## 命令一览
 
-| Command | What it does |
+| 命令 | 说明 |
 |---|---|
-| `login` / `logout` / `whoami` | Token management |
-| `account` | Balance, vouchers, lifetime spend |
-| `ls [--status]` | List instances |
-| `info <id> [--show-password]` | Details, live SSH info, resource usage |
-| `create --gpu <spec>` | Create a pay-as-you-go Pro instance |
-| `start` / `stop` / `rm <id>` | Power on / off / release |
-| `ssh <id> [--auto-auth]` | System OpenSSH with extra flags, or automatic instance-password authentication |
-| `exec <id> <cmd…>` | Run a command, stream output, propagate exit code |
-| `files ls/mkdir/mv/rm <id>` | Browse and manage instance files (SFTP, reused connection) |
-| `queue add/ls/resume/cancel/resolve` | Serial transfer queue, shared with the dashboard |
-| `run <cmd…>` | Create → sync → run → fetch → power off |
-| `deploy <repo>` | Create → clone → install deps → start → **stop, keeping data** |
-| `stock [--gpu] [--region]` | Live GPU stock per region |
-| `guard ttl\|cancel\|idle\|list\|sweep` | Cost guards |
-| `image save <id> <name>` / `images` | Private image management |
-| `gpus` / `regions` | Catalogue lookup |
-| `tui` | Interactive dashboard (also entered by a bare `autodl`) |
-| `mcp` | Run as an MCP server |
+| `login` / `logout` / `whoami` | Token 管理 |
+| `account` | 余额、代金券、累计消费 |
+| `ls [--status]` | 列出实例 |
+| `info <id> [--show-password]` | 详情、实时 SSH 信息、资源占用 |
+| `create --gpu <spec>` | 创建按量计费 Pro 实例 |
+| `start` / `stop` / `rm <id>` | 开机 / 关机 / 释放 |
+| `ssh <id> [--auto-auth]` | 系统 SSH 登录，或使用实例密码自动认证；系统模式支持额外 OpenSSH 参数 |
+| `exec <id> <cmd…>` | 远程执行，流式输出，透传退出码 |
+| `files ls/mkdir/mv/rm <id>` | 实例文件浏览与管理（SFTP，连接复用） |
+| `queue add/ls/resume/cancel/resolve` | 串行传输队列，与看板共用同一队列 |
+| `run <cmd…>` | 建实例 → 同步 → 执行 → 回传 → 关机 |
+| `deploy <仓库>` | 建实例 → 拉代码 → 装依赖 → 启动 → **关机保留数据** |
+| `stock [--gpu] [--region]` | 各地区 GPU 实时库存 |
+| `guard ttl\|cancel\|idle\|list\|sweep` | 成本护栏 |
+| `image save <id> <name>` / `images` | 私有镜像管理 |
+| `gpus` / `regions` | 查询内置目录 |
+| `tui` | 交互式看板（裸 `autodl` 也进入） |
+| `mcp` | 以 MCP server 运行 |
 
-Global flags: `--json`, `--yes`, `--token`, `--base-url`, `--lang zh|en`, `--verbose`,
-`--no-color`, `--no-sweep`.
+全局参数：`--json`、`--yes`、`--token`、`--base-url`、`--lang zh|en`、`--verbose`、
+`--no-color`、`--no-sweep`。
 
-`push` and `pull` skip `.git`, `node_modules`, `__pycache__`, `.venv` and friends, then
-apply `.autodlignore` if present, falling back to `.gitignore`.
+`push` / `pull` 默认跳过 `.git`、`node_modules`、`__pycache__`、`.venv` 等目录，
+然后应用 `.autodlignore`；没有该文件时回退到 `.gitignore`。
 
-## SDK
+## SDK 用法
 
 ```ts
 import {
@@ -402,80 +377,72 @@ console.log(stdout);
 await powerOffInstance(client, uuid);
 ```
 
-Everything re-exported from the package root is public API. Prices arrive as yuan
-(`number`), timestamps as ISO strings, and Go's `sql.NullTime` shape is flattened to
-`string | null`.
+从包根导出的一切都属于公共 API。金额统一转换成元（`number`），时间统一为 ISO 字符串，
+Go 的 `sql.NullTime` 结构会被拍平成 `string | null`。
 
-## What the official API cannot do
+## 官方 API 做不到的事
 
-These are AutoDL's limits, not this tool's. Knowing them up front saves a lot of
-confusion:
+以下是 AutoDL 的限制，不是本工具的限制。提前知道能少走很多弯路：
 
-- **Pay-as-you-go only.** No daily/weekly/monthly plans and no renewal endpoint.
-- **Pro instances only.** The seven specs in `autodl gpus` — the cheaper standard
-  instances aren't reachable through the open API.
-- **No usable stock query for Pro.** The one capacity endpoint reports elastic-deployment
-  stock, which demonstrably does not match Pro availability (see above). Creation is
-  effectively a blind attempt; no capacity means exit code 6 and another spec to try.
-- **Only two regions accept a Pro instance**: `westDC3` and `beijingDC2`.
-- **No CPU-only boot _yet_.** AutoDL's own wording is deliberately provisional:
-  `payload` is documented as `"gpu：有卡开机, 暂不支持API以无卡模式开机"` — *not yet*
-  supported, rather than never. Confirmed on a live instance 2026-08-24: `cpu`,
-  `no_gpu`, `nogpu`, `cpu_only`, `cpu-only` and `none` all return
-  `ServerError | 不支持的启动模式`, and an empty `payload` is accepted but boots with the
-  GPU attached (`start_mode: "gpu"`). Use the web console for the ¥0.1/hr 无卡模式 in the
-  meantime; this tool will expose it once the API does.
-- **Identity verification required** before the API will respond at all.
-- **Missing operations:** rename, scheduled shutdown, resizing, migration, system reset.
-- **SSH credentials can change on any power cycle** — port *and* root password. AutoDL
-  may reschedule the instance onto a different machine. It doesn't always happen (a real
-  stop/start was observed keeping both identical), which is precisely what makes caching
-  dangerous: a stale value works often enough to hide the bug until it doesn't. This tool
-  re-reads them on every connection, so you never have to think about it.
-- **`running` does not mean sshd is ready.** A freshly created instance reports `running`
-  before it accepts connections. Connection attempts here are spaced out rather than
-  fired back to back.
-- **A non-interactive SSH session has almost no PATH.** No python, pip or conda — they
-  live in `/root/miniconda3/bin` and arrive only through the login profile. Every remote
-  command here runs under `bash -lc` for that reason.
-- **Releasing requires a completed shutdown**, and a second `power_off` on an instance
-  that is already stopping is an error. Both are handled internally.
+- **只支持按量计费。** 没有包日/包周/包月，也没有续费接口。
+- **只能创建 Pro 实例。** 即 `autodl gpus` 里那七个规格 —— 更便宜的标准实例
+  官方开放 API 租不到。
+- **没有可用于 Pro 的库存查询接口。** 唯一的容量接口返回的是弹性部署库存，实测与 Pro 可用量
+  对不上（见上文）。创建实际上仍是盲试，无货时返回退出码 6，只能换规格重试。
+- **只有两个地区能创建 Pro 实例**：`westDC3` 和 `beijingDC2`。
+- **暂不支持无卡模式开机。** 官方对 `payload` 的原文是
+  「`gpu：有卡开机, 暂不支持API以无卡模式开机`」——是**暂不**，不是永不。
+  2026-08-24 实测确认：`cpu`、`no_gpu`、`nogpu`、`cpu_only`、`cpu-only`、`none`
+  一律返回 `ServerError | 不支持的启动模式`；传空 `payload` 会被接受，
+  但开出来仍然带卡（`start_mode: "gpu"`）。在官方开放之前，¥0.1/时 的无卡模式
+  只能用网页控制台；等 API 支持了，这个工具会跟进。
+- **必须先完成实名认证**，否则 API 根本不响应。
+- **缺失的操作：** 改名、定时关机、升降配置、迁移实例、重置系统。
+- **开关机后 SSH 端口和 root 密码可能变化。** 因为实例可能被调度到另一台机器。
+  但并不是每次都变（实测一次 stop/start 后端口和密码完全没变），这恰恰是缓存最危险的地方：
+  旧值能用的次数足够多，多到足以把 bug 藏起来。本工具每次连接都重新拉取，所以你不用操心。
+- **状态变成 `running` 不代表 sshd 已经就绪。** 新建实例会在还不能接受连接时就报 `running`，
+  所以本工具的连接重试之间是有退避间隔的，而不是连着打。
+- **非交互 SSH 会话几乎没有 PATH。** 没有 python、没有 pip、没有 conda——它们在
+  `/root/miniconda3/bin`，只有登录 profile 会加进来。所以这里所有远程命令都走 `bash -lc`。
+- **释放必须等关机真正完成**，而且对已经在关机中的实例再调一次关机会报错。两者都已在内部处理。
 
-Also worth knowing: **an instance left shut down for 15 consecutive days is released and
-its data wiped.**
+另外值得注意：**实例连续关机 15 天会被平台释放，数据全部清空。**
 
-Verified against the live API on 2026-08-23: full lifecycle (create → SSH exec → SFTP
-round trip → stop → start → exec again → release) on a 4090D, total cost ¥0.10.
+已于 2026-08-23 对真实 API 做过完整验证：4090D 上跑通
+创建 → SSH 执行 → SFTP 双向传输 → 关机 → 开机 → 再次执行 → 释放，总花费 ¥0.10。
 
-The GPU spec, region and base-image tables are baked in because the API exposes no
-catalogue endpoint. If AutoDL changes them, please
-[open an issue](https://github.com/Minato-Aqukin/AutoDL-cli/issues).
+GPU 规格、地区、公共基础镜像三张表是内置的静态数据，因为官方 API 没有目录接口。
+如果 AutoDL 更新了，欢迎来
+[提 issue](https://github.com/Minato-Aqukin/AutoDL-cli/issues)。
 
-## Development
+## 开发
 
 ```bash
 npm install
 npm run build
-npm test            # 325 tests, no network access, no cost
+npm test            # 325 个测试，不访问网络，不产生任何费用
 npm run lint
 npm run typecheck
 ```
 
-Real end-to-end tests rent an actual GPU and cost actual money, so they're opt-in:
+真实端到端测试会租用真实 GPU、产生真实费用，因此需要显式开启：
 
 ```bash
 AUTODL_E2E=1 AUTODL_TOKEN=<token> npm run test:e2e
 ```
 
-They always power the instance down in an `afterAll`, even on failure. Add
-`AUTODL_E2E_RELEASE=1` to release it too.
+无论测试成功与否，`afterAll` 都会把实例关机。加上 `AUTODL_E2E_RELEASE=1` 可以顺便释放。
 
-## Contributing
+## 贡献
 
-Issues and PRs welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md). Especially valuable:
-corrections to the static catalogue, and real API error codes we haven't mapped yet
-(AutoDL doesn't document them).
+欢迎提 issue 和 PR，详见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
+特别欢迎两类贡献：修正内置的静态目录数据，以及补充我们尚未映射的真实 API 错误码
+（AutoDL 官方并未公开这些错误码）。
 
-## License
+## 许可证
 
 [MIT](./LICENSE)
+
+发布的 npm 包把 Ink、React 及其依赖打包进了 `dist/`，它们的许可证声明随包附在
+`dist/THIRD_PARTY_LICENSES.txt`。
