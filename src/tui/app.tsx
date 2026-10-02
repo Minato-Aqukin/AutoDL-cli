@@ -12,12 +12,13 @@ import {
   tryResolveToken,
   updateConfig,
 } from "../config/store.js";
-import { findBaseImage, parseCudaVersion } from "../core/catalog.js";
+import { parseCudaVersion } from "../core/catalog.js";
 import { AutoDLClient, DEFAULT_BASE_URL } from "../core/client.js";
 import { getBalance } from "../core/endpoints/account.js";
+import { listAllPrivateImages, saveImage } from "../core/endpoints/image.js";
 import { createInstance, getInstanceStatus } from "../core/endpoints/instance.js";
 import { isAuthError } from "../core/errors.js";
-import type { Balance } from "../core/schemas.js";
+import type { Balance, PrivateImage } from "../core/schemas.js";
 import type { StockSnapshot } from "../core/stock.js";
 import { getStockByRegion } from "../core/stock.js";
 import { composeStartCommand, recordTTL } from "../guard/ttl.js";
@@ -43,16 +44,18 @@ import { Dashboard } from "./screens/dashboard.js";
 import { Detail } from "./screens/detail.js";
 import { SessionExpired } from "./screens/expired.js";
 import { FilesScreen, TransferJobs } from "./screens/files.js";
+import { ImagesScreen, SAVE_IMAGE_KEYS, SaveImagePrompt } from "./screens/images.js";
 import { Login } from "./screens/login.js";
 import { StockScreen, toStockRows } from "./screens/stock.js";
 import { useTerminalSize } from "./useTerminalSize.js";
 
-type View = "dashboard" | "detail" | "stock" | "create" | "help" | "files" | "transfers";
+type View = "dashboard" | "detail" | "stock" | "images" | "create" | "help" | "files" | "transfers";
 
 const SCREEN_TITLES: Record<View, string> = {
   dashboard: "实例看板",
   detail: "实例详情",
   stock: "GPU 库存",
+  images: "私有镜像",
   create: "新建实例",
   help: "快捷键",
   files: "文件管理",
@@ -64,13 +67,14 @@ type AccessAction =
   | { kind: "resume"; uuid: string; jobId: string };
 type Pending =
   | { kind: "release"; row: DashboardRow }
+  | { kind: "saveImage"; row: DashboardRow }
   | { kind: "logout" }
   | { kind: "exit" }
   | { kind: "power"; action: AccessAction }
   | null;
 
 const DASHBOARD_KEYS =
-  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · n 新建 · ctrl+d 释放 · g 库存 · r 刷新 · ctrl+l 退出登录 · ? 帮助 · q 退出";
+  "↑↓ 移动 · Enter 详情 · s 开机 · x 关机 · n 新建 · ctrl+d 释放 · g 库存 · i 镜像 · r 刷新 · ctrl+l 退出登录 · ? 帮助 · q 退出";
 
 /**
  * ctrl+<letter>, whatever the shift state.
@@ -120,6 +124,10 @@ export function App({
   const [stock, setStock] = useState<StockSnapshot[]>([]);
   const [stockLoading, setStockLoading] = useState(false);
   const [stockIndex, setStockIndex] = useState(0);
+  const [images, setImages] = useState<PrivateImage[]>([]);
+  const [imagesLoading, setImagesLoading] = useState(false);
+  const [imagesError, setImagesError] = useState<string | null>(null);
+  const [imagesIndex, setImagesIndex] = useState(0);
   const [balance, setBalance] = useState<Balance | null>(null);
   const [balanceError, setBalanceError] = useState<string | null>(null);
   /** Non-null once the token has been rejected: the session is over, not merely erroring. */
@@ -373,6 +381,23 @@ export function App({
       setStockLoading(false);
     }
   }, [client, flash, noteAuthFailure]);
+  // Reloaded on every visit to the list or the wizard, not cached like stock: a save in
+  // progress is exactly the status someone opens either of them to check.
+  const loadImages = useCallback(async () => {
+    setImagesLoading(true);
+    try {
+      const list = await listAllPrivateImages(client);
+      setImages(list);
+      setImagesIndex((v) => Math.min(v, Math.max(0, list.length - 1)));
+      setImagesError(null);
+    } catch (err) {
+      setImagesError((err as Error).message);
+      flash(`✖ 镜像列表读取失败：${(err as Error).message}`);
+      noteAuthFailure(err);
+    } finally {
+      setImagesLoading(false);
+    }
+  }, [client, flash, noteAuthFailure]);
   const copySSH = useCallback(
     (uuid: string) => {
       const snapshot = snapshotFor(uuid);
@@ -513,20 +538,21 @@ export function App({
     async (draft: CreateDraft) => {
       setBusy(true);
       try {
-        // Derived from the image the wizard actually offered, exactly as `autodl create`
-        // does. Hardcoding 11.8 shipped every instance with that floor no matter which
+        // The CUDA floor the wizard showed for the chosen image, exactly as `autodl create`
+        // derives it. Hardcoding 11.8 shipped every instance with that floor no matter which
         // CUDA the chosen image advertised one screen earlier.
-        const image = findBaseImage(draft.imageUuid);
-        const startCommand = composeStartCommand(draft.ttlSeconds, undefined);
+        const startCommand = composeStartCommand(draft.ttlSeconds ?? undefined, undefined);
         const uuid = await createInstance(client, {
           gpuSpec: draft.spec.id,
           gpuNum: 1,
           imageUuid: draft.imageUuid,
-          cudaFrom: parseCudaVersion(image?.cuda ?? "11.8"),
+          cudaFrom: parseCudaVersion(draft.cuda),
           expandSystemDiskGb: 0,
           ...(startCommand ? { startCommand } : {}),
         });
-        recordTTL({ uuid, ttlSeconds: draft.ttlSeconds, inInstanceTimer: true });
+        if (draft.ttlSeconds) {
+          recordTTL({ uuid, ttlSeconds: draft.ttlSeconds, inInstanceTimer: true });
+        }
         setView("dashboard");
         flash(`✔ 已创建 ${uuid}　等价命令：${equivalentCommand(draft)}`);
       } catch (err) {
@@ -553,7 +579,7 @@ export function App({
         setView("dashboard");
         return;
       }
-      if (view === "detail" || view === "stock") {
+      if (view === "detail" || view === "stock" || view === "images") {
         if (key.escape || input === "q") return setView("dashboard");
       }
 
@@ -565,6 +591,14 @@ export function App({
         if (key.downArrow || input === "j")
           return setStockIndex((v) => Math.max(0, Math.min(max - 1, v + 1)));
         if (input === "r") return void loadStock();
+        return;
+      }
+
+      if (view === "images") {
+        if (key.upArrow || input === "k") return setImagesIndex((v) => Math.max(0, v - 1));
+        if (key.downArrow || input === "j")
+          return setImagesIndex((v) => Math.max(0, Math.min(images.length - 1, v + 1)));
+        if (input === "r") return void loadImages();
         return;
       }
 
@@ -584,7 +618,15 @@ export function App({
           }
           return;
         }
-        if (input === "n") return setView("create");
+        if (input === "n") {
+          setView("create");
+          void loadImages();
+          return;
+        }
+        if (input === "i") {
+          if (busy) return;
+          return setPending({ kind: "saveImage", row });
+        }
         return;
       }
 
@@ -604,9 +646,19 @@ export function App({
         if (stock.length === 0) void loadStock();
         return;
       }
+      // Account-wide, so it sits before the empty guard with `n`.
+      if (input === "i") {
+        setView("images");
+        void loadImages();
+        return;
+      }
       // Before the empty guard: a fresh account has no rows, and `n` is the only
       // way out of the dashboard the empty state advertises.
-      if (input === "n") return setView("create");
+      if (input === "n") {
+        setView("create");
+        void loadImages();
+        return;
+      }
       if (!row) return;
       if (key.return) {
         setReveal(false);
@@ -650,25 +702,28 @@ export function App({
   const hints =
     expired && !pending
       ? "Enter 重新登入 · q 退出"
-      : pending
-        ? CONFIRM_KEYS
-        : view === "files" || view === "transfers"
-          ? "Esc 返回 · ctrl+c 退出（未完成任务先确认）"
-          : view === "create"
-            ? // Step-agnostic on purpose: the wizard's own line says what Enter does at this
-              // step, and only Esc is true at every one of them.
-              "Esc 取消"
-            : view === "help"
-              ? "按任意键返回"
-              : view === "detail"
-                ? "h SSH登录 · f 文件 · t 传输 · c 复制SSH · n 新建 · p 显示/隐藏密码 · Esc 返回"
-                : view === "stock"
-                  ? "↑↓ 移动 · r 刷新 · Esc 返回"
-                  : DASHBOARD_KEYS;
+      : pending?.kind === "saveImage"
+        ? SAVE_IMAGE_KEYS
+        : pending
+          ? CONFIRM_KEYS
+          : view === "files" || view === "transfers"
+            ? "Esc 返回 · ctrl+c 退出（未完成任务先确认）"
+            : view === "create"
+              ? // Step-agnostic on purpose: the wizard's own line says what Enter does at this
+                // step, and only Esc is true at every one of them.
+                "Esc 取消"
+              : view === "help"
+                ? "按任意键返回"
+                : view === "detail"
+                  ? "h SSH登录 · f 文件 · t 传输 · c 复制SSH · n 新建 · i 保存镜像 · p 显示/隐藏密码 · Esc 返回"
+                  : view === "stock" || view === "images"
+                    ? "↑↓ 移动 · r 刷新 · Esc 返回"
+                    : DASHBOARD_KEYS;
 
   // Mirrors the render chain below: everything else takes the screen from the dashboard.
   const showsDashboard = !expired && !pending && view === "dashboard";
   const showsFiles = !expired && !pending && (view === "files" || view === "transfers");
+  const showsList = !expired && !pending && (view === "stock" || view === "images");
 
   return (
     // Claim the entire terminal so the dashboard is a fixed full-screen surface rather
@@ -767,6 +822,19 @@ export function App({
           }}
           onCancel={() => setPending(null)}
         />
+      ) : pending?.kind === "saveImage" ? (
+        <SaveImagePrompt
+          instance={pending.row.instance}
+          onSubmit={(name) => {
+            const target = pending.row;
+            setPending(null);
+            void act("保存镜像", async () => {
+              const imageUuid = await saveImage(client, target.instance.uuid, name);
+              return `✔ 镜像保存已提交：${imageUuid}（需要一段时间，回看板按 i 查看进度）`;
+            });
+          }}
+          onCancel={() => setPending(null)}
+        />
       ) : view === "files" && workspace && queueRef.current ? (
         <FilesScreen
           workspace={workspace}
@@ -787,7 +855,16 @@ export function App({
           onResume={resumeTransfer}
         />
       ) : view === "create" ? (
-        <CreateWizard busy={busy} onSubmit={submitCreate} onCancel={() => setView("dashboard")} />
+        <CreateWizard
+          busy={busy}
+          privateImages={images}
+          privateImagesLoading={imagesLoading}
+          privateImagesError={imagesError}
+          width={columns}
+          height={terminalRows}
+          onSubmit={submitCreate}
+          onCancel={() => setView("dashboard")}
+        />
       ) : view === "detail" && row ? (
         <Detail row={row} snapshot={snapshotFor(row.instance.uuid)} revealSecrets={reveal} />
       ) : view === "stock" ? (
@@ -795,6 +872,17 @@ export function App({
           rows={toStockRows(stock, false)}
           selectedIndex={stockIndex}
           loading={stockLoading}
+          width={columns}
+          height={terminalRows}
+        />
+      ) : view === "images" ? (
+        <ImagesScreen
+          images={images}
+          selectedIndex={imagesIndex}
+          loading={imagesLoading}
+          error={imagesError}
+          width={columns}
+          height={terminalRows}
         />
       ) : view === "help" ? (
         <Box flexDirection="column" borderStyle="round" paddingX={1}>
@@ -823,9 +911,9 @@ export function App({
         />
       )}
 
-      {/* The dashboard fills the frame itself; anything else is a block that needs
-          pushing up so the key hints stay pinned to the bottom. */}
-      {showsDashboard || showsFiles ? null : <Box flexGrow={1} />}
+      {/* The dashboard and the list screens fill the frame themselves; anything else is a
+          block that needs pushing up so the key hints stay pinned to the bottom. */}
+      {showsDashboard || showsFiles || showsList ? null : <Box flexGrow={1} />}
 
       {showsFiles ? (
         <Box height={1} flexShrink={0}>

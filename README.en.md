@@ -49,10 +49,19 @@ being saved, and you land on the dashboard. Once configured, `autodl` goes strai
 
 A live table of your instances: status, GPU, region, **how long each has been powered on
 and roughly what that has cost**, and how much TTL is left. Keys: `↑↓` move, `Enter`
-detail, `s` start, `x` stop, `ctrl+d` release, `g` stock,
+detail, `s` start, `x` stop, `ctrl+d` release, `g` stock, `i` private images,
 `r` refresh, `ctrl+l` log out, `?` help, `q` quit. Release and logout require confirmation.
 The detail screen (`Enter`) owns the per-instance keys: `h` automatically authenticated
-SSH, `f` files, `t` transfers, `c` copy the SSH command, `n` new instance.
+SSH, `f` files, `t` transfers, `c` copy the SSH command, `n` new instance, `i` save as a
+private image.
+
+The `i` image list is re-read on every visit; the status column shows a save in progress.
+Deleting, renaming and sharing images are not in the open API, so they stay in the AutoDL
+web console. The create wizard's image step lists finished private images ahead of the
+public ones; the list carries no CUDA version, so they are scheduled with CUDA ≥ 11.8, the
+same as `autodl create --image <private>`. Its TTL step offers 不限时 (no limit): no
+shutdown timer, the same as `autodl create` without `--ttl` — the instance bills until you
+stop it.
 
 `ctrl+d` release wipes the instance permanently, which is why it is not a bare `d`.
 
@@ -103,11 +112,17 @@ forwarding such as `-L`. The implementation uses cross-platform Node.js terminal
 filesystem interfaces for Linux, macOS and native Windows; sshpass is not required.
 
 On the detail screen, `f` opens local/remote panes; narrow terminals show the active pane. `Tab` switches
-sides, arrows and Enter navigate, Space selects multiple entries, and `a` selects all.
+sides, arrows and Enter navigate, PgUp/PgDn page, Home/End jump to either end, Space
+selects multiple entries, and `a` selects all.
 `g` accepts a directory path; `p` accepts source/destination paths directly.
 `u` transfers the selection to the opposite pane after confirming direction.
 `m` creates directories, `r` renames or moves within one side, and `x` permanently
 deletes after confirmation. `Q` opens the queue; Esc returns.
+
+The selected entry stays mid-window with its neighbours in view, leaving the middle only
+at either end of the list. A refresh — after creating, renaming or deleting, or the
+automatic one when a transfer finishes — keeps the cursor on the same entry; going up
+lands on the directory you just left.
 
 Relative paths resolve against their corresponding pane. Selected source basenames
 are preserved: copying `project` into `/root/work` produces `/root/work/project`.

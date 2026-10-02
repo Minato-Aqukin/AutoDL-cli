@@ -2,11 +2,14 @@ import { basename, dirname, join, posix, resolve } from "node:path";
 import { Box, Text, useInput } from "ink";
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { formatBytes } from "../../output/format.js";
+import { formatBytes, stringWidth } from "../../output/format.js";
 import type { FileEntry, FileSide } from "../../ssh/file-types.js";
 import type { TransferJob, TransferQueueView } from "../../ssh/queue-types.js";
 import { bar } from "../components/meters.js";
+import { PANEL_PADDING, Panel } from "../components/panel.js";
 import { clip } from "../components/table.js";
+import { centeredStart } from "../scroll.js";
+import { isVisibleCode, sanitizeInput } from "../text.js";
 
 /**
  * File browser + transfer queue screen.
@@ -60,13 +63,6 @@ export interface TransferJobsProps {
 
 const REMOTE_HOME = "/root/autodl-tmp";
 
-/** C0 controls, DEL, and C1 controls (U+0080–U+009F) never reach the screen or fields. */
-function isVisibleCode(code: number): boolean {
-  if (code < 0x20 || code === 0x7f) return false;
-  if (code >= 0x80 && code <= 0x9f) return false;
-  return true;
-}
-
 /** Strip control characters so hostile file names cannot inject terminal escapes. */
 function visible(input: string): string {
   let out = "";
@@ -74,14 +70,6 @@ function visible(input: string): string {
     if (isVisibleCode(char.codePointAt(0) ?? 0)) out += char;
   }
   return out || "?";
-}
-
-function sanitizeInput(input: string): string {
-  let out = "";
-  for (const char of input) {
-    if (isVisibleCode(char.codePointAt(0) ?? 0)) out += char;
-  }
-  return out;
 }
 
 const joinSide = (side: FileSide, dir: string, name: string): string =>
@@ -143,6 +131,8 @@ interface Pane {
   error: string | null;
   cursor: number;
   checked: string[];
+  /** The directory just navigated away from; the cursor lands on it if the new listing has it. */
+  from: string | null;
 }
 
 const emptyPane = (p: string): Pane => ({
@@ -152,6 +142,7 @@ const emptyPane = (p: string): Pane => ({
   error: null,
   cursor: 0,
   checked: [],
+  from: null,
 });
 
 type BrowserMode =
@@ -258,6 +249,28 @@ function fitLine(text: string, width: number): string {
   return clip(visible(text), Math.max(1, width));
 }
 
+/**
+ * Lay key hints out in as few lines as fit `width`, breaking only between items.
+ *
+ * Fixed line splits clipped the last binding at one width and wasted a row at another;
+ * packing keeps every binding readable and gives wide terminals the rows back.
+ */
+function packHints(items: string[], width: number): string[] {
+  const lines: string[] = [];
+  let line = "";
+  for (const item of items) {
+    const joined = line ? `${line} · ${item}` : item;
+    if (line && stringWidth(joined) > width) {
+      lines.push(line);
+      line = item;
+    } else {
+      line = joined;
+    }
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
 /** First visible skipped row for a paged window of 3. */
 function skippedPageStart(index: number): number {
   return Math.floor(Math.max(0, index) / 3) * 3;
@@ -296,20 +309,19 @@ function detailRows(
   return n;
 }
 
-function renderQueueBody(ui: QueueUi): React.ReactElement {
+/** The queue list and the selected job's detail, framed as one panel. */
+function renderQueueBody(ui: QueueUi, note: string): React.ReactElement {
   const { jobs, cursor, listRows } = ui;
   const width = Math.max(20, ui.width);
-  const rowWidth = Math.max(1, width - 2);
-  const start = Math.max(0, Math.min(cursor, Math.max(0, jobs.length - listRows)));
+  const rowWidth = Math.max(1, width - PANEL_PADDING);
+  const start = centeredStart(cursor, jobs.length, listRows);
   const shown = jobs.slice(start, start + listRows);
   return (
-    <Box flexDirection="column">
+    <Panel title="传输队列" note={note} accent="cyan" flexGrow={1}>
       {jobs.length === 0 ? (
-        <Box paddingX={1}>
-          <Text dimColor wrap="truncate">
-            {fitLine("队列为空。在浏览器按 u 将选中文件加入传输队列。", rowWidth)}
-          </Text>
-        </Box>
+        <Text dimColor wrap="truncate">
+          {fitLine("队列为空。在浏览器按 u 将选中文件加入传输队列。", rowWidth)}
+        </Text>
       ) : (
         shown.map((job, i) => {
           const index = start + i;
@@ -337,7 +349,7 @@ function renderQueueBody(ui: QueueUi): React.ReactElement {
         })
       )}
       <QueueDetail ui={ui} />
-    </Box>
+    </Panel>
   );
 }
 
@@ -394,7 +406,8 @@ function QueueDetail({ ui }: { ui: QueueUi }): React.ReactElement | null {
   const job = ui.jobs[Math.min(ui.cursor, Math.max(0, ui.jobs.length - 1))];
   if (!job || !ui.showDetail) return null;
   const req = job.request;
-  const width = Math.max(20, ui.width - 4);
+  // The panel around the queue takes its border and padding.
+  const width = Math.max(20, ui.width - PANEL_PADDING);
   const lines: React.ReactNode[] = [
     <Text key="h" bold wrap="truncate">
       {fitLine(
@@ -475,11 +488,7 @@ function QueueDetail({ ui }: { ui: QueueUi }): React.ReactElement | null {
       </Text>,
     );
   }
-  return (
-    <Box flexDirection="column" paddingX={1}>
-      {lines}
-    </Box>
-  );
+  return <Box flexDirection="column">{lines}</Box>;
 }
 
 /**
@@ -642,10 +651,10 @@ export function TransferJobs({
     setSkippedOpen(false);
     setSkippedIndex(0);
   }, [selectedId]);
-  // Title (1) + list + detail + notice + hints (2) = height.
+  // Panel border (2, the title in its top row) + list + detail + notice + hints (2) = height.
   const listRows = Math.max(
     1,
-    height - 3 - detailRows(selected, showDetail, skippedOpen, skippedIndex) - (notice ? 1 : 0),
+    height - 4 - detailRows(selected, showDetail, skippedOpen, skippedIndex) - (notice ? 1 : 0),
   );
   const ui: QueueUi = {
     jobs,
@@ -672,15 +681,10 @@ export function TransferJobs({
 
   return (
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
-      <Box paddingX={1}>
-        <Text bold>传输队列</Text>
-        <Text dimColor>
-          　{jobs.length} 个任务（串行）
-          {jobs.length > 0 ? ` · ${clamped + 1}/${jobs.length}` : ""}
-        </Text>
-      </Box>
-      {renderQueueBody(ui)}
-      <Box flexGrow={1} />
+      {renderQueueBody(
+        ui,
+        `${jobs.length} 个任务（串行）${jobs.length > 0 ? ` · ${clamped + 1}/${jobs.length}` : ""}`,
+      )}
       {notice ? (
         <Box paddingX={1}>
           <Text color="cyan">{clip(visible(notice), Math.max(10, width - 2))}</Text>
@@ -777,11 +781,18 @@ export function FilesScreen({
     (side: FileSide, nextPath: string) => {
       gen.current[side] += 1;
       const g = gen.current[side];
-      if (side === "local") {
-        setPanes((prev) => ({ ...prev, local: { ...emptyPane(nextPath), cursor: 0 } }));
-      } else {
-        setPanes((prev) => ({ ...prev, remote: { ...emptyPane(nextPath), cursor: 0 } }));
-      }
+      // A refresh keeps the old listing and cursor on screen until the new listing
+      // arrives — no blank flash, and the cursor can be put back on the same entry.
+      // Navigating starts empty but remembers where it came from, so going up lands
+      // on the directory just left.
+      setPanes((prev) => {
+        const current = prev[side];
+        const next: Pane =
+          current.path === nextPath
+            ? { ...current, loading: true, error: null, checked: [] }
+            : { ...emptyPane(nextPath), from: current.path };
+        return side === "local" ? { ...prev, local: next } : { ...prev, remote: next };
+      });
       const run = () => {
         if (!mounted.current || gen.current[side] !== g) return;
         workspace
@@ -793,11 +804,23 @@ export function FilesScreen({
               if (a.kind !== "directory" && b.kind === "directory") return 1;
               return a.name.localeCompare(b.name);
             });
-            setPanes((prev) =>
-              side === "local"
-                ? { ...prev, local: { ...prev.local, entries: sorted, loading: false } }
-                : { ...prev, remote: { ...prev.remote, entries: sorted, loading: false } },
-            );
+            setPanes((prev) => {
+              const current = prev[side];
+              // Read at arrival, not at request: a cursor moved during the refresh is
+              // where the user is now. A vanished entry keeps its position, which puts
+              // the cursor on whatever slid into its place.
+              const focus = current.entries[current.cursor]?.path ?? current.from;
+              const found = focus ? sorted.findIndex((entry) => entry.path === focus) : -1;
+              const next: Pane = {
+                ...current,
+                entries: sorted,
+                loading: false,
+                from: null,
+                cursor:
+                  found >= 0 ? found : Math.min(current.cursor, Math.max(0, sorted.length - 1)),
+              };
+              return side === "local" ? { ...prev, local: next } : { ...prev, remote: next };
+            });
           })
           .catch((err: unknown) => {
             if (!mounted.current || gen.current[side] !== g) return;
@@ -841,7 +864,7 @@ export function FilesScreen({
     new Set(jobs.filter((job) => job.state === "completed").map((job) => job.request.id)),
   );
   useEffect(() => {
-    // A dialog freezes its targets at open; a reload would reset cursor/checked
+    // A dialog freezes its targets at open; a reload would clear the checked set
     // and repaint the frozen dialog's title, so completions wait until it closes.
     if (mode.name !== "none") return;
     for (const job of jobs) {
@@ -1243,6 +1266,25 @@ export function FilesScreen({
       setPaneCursor(activeSide, (v) => Math.max(0, Math.min(pane.entries.length - 1, v + 1)));
       return;
     }
+    // A page is the rows the pane shows, so the next page starts where this one ended.
+    if (key.pageUp) {
+      setPaneCursor(activeSide, (v) => Math.max(0, v - listRows));
+      return;
+    }
+    if (key.pageDown) {
+      setPaneCursor(activeSide, (v) =>
+        Math.max(0, Math.min(pane.entries.length - 1, v + listRows)),
+      );
+      return;
+    }
+    if (key.home) {
+      setPaneCursor(activeSide, () => 0);
+      return;
+    }
+    if (key.end) {
+      setPaneCursor(activeSide, () => Math.max(0, pane.entries.length - 1));
+      return;
+    }
     if (key.return || key.rightArrow || input === "l") {
       if (cursorEntry?.kind === "directory") loadPane(activeSide, cursorEntry.path);
       else if (cursorEntry) flash("文件不能进入：u 传输 · r 改名 · x 删除");
@@ -1337,20 +1379,29 @@ export function FilesScreen({
   const narrow = width < 64;
   const hintLines =
     mode.name === "none"
-      ? narrow
-        ? [
-            "Tab 切侧 · ↑↓ 移动 · Enter 进入",
-            "← 返回 · Space 多选 · a 全选",
-            "u 传输 · p 路径直传 · g 跳转",
-            "m 新建 · r 移动 · x 删除",
-            `s 同步[${syncDefault ? "开" : "关"}] c 校验[${checksumDefault ? "开" : "关"}] · Q 队列`,
+      ? packHints(
+          [
+            "Tab 切侧",
+            "↑↓ 移动",
+            "PgUp/PgDn 翻页",
+            "Home/End 首尾",
+            "Enter 进入",
+            "← 返回",
+            "Space 多选",
+            "a 全选",
+            "u 传输",
+            "p 路径直传",
+            "g 跳转",
+            "m 新建",
+            "r 改名/移动",
+            "x 删除",
+            `s 同步[${syncDefault ? "开" : "关"}]`,
+            `c 校验[${checksumDefault ? "开" : "关"}]`,
+            "Q 队列",
             "Esc/q 返回",
-          ]
-        : [
-            "Tab 切侧 · ↑↓ 移动 · Enter 进入 · ← 返回 · Space 多选 · a 全选",
-            "u 传输 · p 路径直传 · g 跳转 · Q 队列 · Esc/q 返回",
-            `m 新建 · r 改名/移动 · x 删除 · s 同步[${syncDefault ? "开" : "关"}] c 校验[${checksumDefault ? "开" : "关"}]`,
-          ]
+          ],
+          Math.max(10, width - 2),
+        )
       : mode.name === "delete"
         ? ["←→ 选择 · Enter 确定 · y 删除 · Esc/q/n 取消"]
         : mode.name === "transfer"
@@ -1363,8 +1414,9 @@ export function FilesScreen({
     mode.name === "delete" || mode.name === "rename" ? mode.targets : selection;
   const dialogH = dialogRows(mode, dialogTargets.length);
   const hintCount = hintLines.length;
-  // Title (1) + pane header (1) + entries + pane footer (1) + dialog + notice + hints.
-  const listRows = Math.max(1, height - 3 - dialogH - (notice ? 1 : 0) - hintCount);
+  // Title (1) + pane border (2, path in the top one) + entries + pane footer (1) + dialog
+  // + notice + hints.
+  const listRows = Math.max(1, height - 4 - dialogH - (notice ? 1 : 0) - hintCount);
 
   // Per-side Sets mirror checkedSet above so the visible-rows render stays
   // O(rows) instead of O(rows × checked) on every transfer-tick re-render.
@@ -1380,57 +1432,54 @@ export function FilesScreen({
     const activePane = side === activeSide && !(narrow && side !== activeSide);
     const idx =
       side === activeSide ? cursorIndex : Math.min(p.cursor, Math.max(0, p.entries.length - 1));
-    const nameWidth = Math.max(8, paneWidth - 14);
-    const start = Math.max(0, Math.min(idx, Math.max(0, p.entries.length - listRows)));
+    const nameWidth = Math.max(8, paneWidth - 14 - PANEL_PADDING);
+    const start = centeredStart(idx, p.entries.length, listRows);
     const shown = p.entries.slice(start, start + listRows);
     const checked = checkedBySide[side];
     return (
       <Box flexDirection="column" width={paneWidth} flexShrink={0}>
-        <Box paddingX={1}>
-          <Text bold={activePane} color={activePane ? "green" : undefined}>
-            {side === "local" ? "▸本地" : "▸远程"}
-          </Text>
-          <Text dimColor> {clip(visible(p.path), Math.max(8, paneWidth - 10))}</Text>
-        </Box>
-        {p.loading ? (
-          <Box paddingX={1}>
+        <Panel
+          title={side === "local" ? "本地" : "远程"}
+          // Clipped: the path sits in the top border and would otherwise run through
+          // the pane's corner.
+          note={clip(visible(p.path), Math.max(4, paneWidth - 12))}
+          accent={activePane ? "green" : undefined}
+          flexGrow={1}
+        >
+          {p.loading && p.entries.length === 0 ? (
             <Text dimColor>读取中…</Text>
-          </Box>
-        ) : p.error ? (
-          <Box paddingX={1}>
-            <Text color="red">✖ {clip(visible(p.error), Math.max(8, paneWidth - 4))}</Text>
-          </Box>
-        ) : p.entries.length === 0 ? (
-          <Box paddingX={1}>
+          ) : p.error ? (
+            <Text color="red">✖ {clip(visible(p.error), Math.max(8, paneWidth - 6))}</Text>
+          ) : p.entries.length === 0 ? (
             <Text dimColor>空目录</Text>
-          </Box>
-        ) : (
-          shown.map((entry, i) => {
-            const absolute = start + i;
-            const isCursor = side === activeSide && absolute === idx;
-            const isChecked = checked.has(entry.path);
-            const label = `${isChecked ? "[✓]" : "[ ]"}${isCursor ? "›" : " "}${visible(entry.name)}${kindMark(entry.kind)}`;
-            return (
-              <Box key={entry.path}>
-                <Text>
-                  <Text inverse={isCursor}>{clip(label, nameWidth)}</Text>
-                  <Text dimColor>
-                    {" "}
-                    {entry.kind === "directory" ? "-" : formatBytes(entry.size)}
+          ) : (
+            shown.map((entry, i) => {
+              const absolute = start + i;
+              const isCursor = side === activeSide && absolute === idx;
+              const isChecked = checked.has(entry.path);
+              const label = `${isChecked ? "[✓]" : "[ ]"}${isCursor ? "›" : " "}${visible(entry.name)}${kindMark(entry.kind)}`;
+              return (
+                <Box key={entry.path}>
+                  <Text>
+                    <Text inverse={isCursor}>{clip(label, nameWidth)}</Text>
+                    <Text dimColor>
+                      {" "}
+                      {entry.kind === "directory" ? "-" : formatBytes(entry.size)}
+                    </Text>
+                    {entry.kind === "symlink" ? <Text color="yellow"> 跳过</Text> : null}
                   </Text>
-                  {entry.kind === "symlink" ? <Text color="yellow"> 跳过</Text> : null}
-                </Text>
-              </Box>
-            );
-          })
-        )}
-        <Box paddingX={1}>
-          <Text dimColor>
+                </Box>
+              );
+            })
+          )}
+          <Box flexGrow={1} />
+          <Text dimColor wrap="truncate">
             {p.entries.length > listRows ? `${idx + 1}/` : ""}
             {p.entries.length} 项{p.checked.length > 0 ? ` · 已选 ${p.checked.length}` : ""}
             {p.entries.some((e) => e.kind === "symlink") ? " · @符号链接将跳过" : ""}
+            {p.loading ? " · 刷新中…" : ""}
           </Text>
-        </Box>
+        </Panel>
       </Box>
     );
   };
@@ -1552,8 +1601,8 @@ export function FilesScreen({
     const clamped = Math.min(queueCursor, Math.max(0, jobs.length - 1));
     const selected = jobs[clamped];
     const detail = detailRows(selected, queueDetail, skippedOpen, skippedIndex);
-    // Title (1) + list + detail + notice + hints (2) + Q line (1) = height.
-    const queueListRows = Math.max(1, height - 4 - detail - (notice ? 1 : 0));
+    // Title (1) + panel border (2) + list + detail + notice + hints (2) + Q line (1) = height.
+    const queueListRows = Math.max(1, height - 6 - detail - (notice ? 1 : 0));
     const ui: QueueUi = {
       jobs,
       cursor: clamped,
@@ -1580,8 +1629,7 @@ export function FilesScreen({
             {jobs.length > 0 ? ` · ${clamped + 1}/${jobs.length}` : ""}
           </Text>
         </Box>
-        {renderQueueBody(ui)}
-        <Box flexGrow={1} />
+        {renderQueueBody(ui, `${jobs.length} 个任务（串行）`)}
         {notice ? (
           <Box paddingX={1}>
             <Text color="cyan">{clip(visible(notice), Math.max(10, width - 2))}</Text>
@@ -1611,9 +1659,12 @@ export function FilesScreen({
           {jobs.length}){busy ? " · 处理中…" : ""}
         </Text>
       </Box>
-      <Box flexDirection="row">
+      {/* Grows, so both panes reach down to the dialog and hints however short their
+          listings are; side by side they sit one column apart, like the dashboard's. */}
+      <Box flexDirection="row" flexGrow={1} gap={narrow ? 0 : 1}>
         {narrow ? (
-          renderPane(activeSide, Math.max(20, width - 2))
+          // Full width, so its border lines up with the dialogs drawn under it.
+          renderPane(activeSide, Math.max(20, width))
         ) : (
           <>
             {renderPane("local", half)}
@@ -1622,7 +1673,6 @@ export function FilesScreen({
         )}
       </Box>
       {renderDialog()}
-      <Box flexGrow={1} />
       {notice ? (
         <Box paddingX={1}>
           <Text color="cyan">{clip(visible(notice), Math.max(10, width - 2))}</Text>

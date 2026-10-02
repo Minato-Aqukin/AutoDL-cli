@@ -1,8 +1,9 @@
-import { Box, Text } from "ink";
+import { Text } from "ink";
 import type React from "react";
 import { GPU_SPECS, PRO_CREATE_REGIONS } from "../../core/catalog.js";
 import type { StockSnapshot } from "../../core/stock.js";
-import { type Column, Table } from "../components/table.js";
+import { type ListNote, ListPanel } from "../components/list-panel.js";
+import type { Column } from "../components/table.js";
 
 export interface StockRow {
   regionId: string;
@@ -74,36 +75,42 @@ const columns: Column<StockRow>[] = [
   },
 ];
 
+const NOTES: ListNote[] = [
+  {
+    text: `「可建Pro」只有 ${PRO_CREATE_REGIONS.map((r) => r.displayName).join(" / ")} 为是，其余地区仅用于弹性部署。`,
+  },
+  {
+    text: "数字来自「弹性部署 GPU 库存」，不代表 Pro 实例可用量——实测出现过显示 140 张空闲、创建却提示暂无库存的情况。",
+    color: "yellow",
+  },
+];
+
 interface StockScreenProps {
   rows: StockRow[];
   selectedIndex: number;
   loading: boolean;
+  width: number;
+  height: number;
 }
 
 export function StockScreen({
   rows,
   selectedIndex,
   loading,
+  width,
+  height,
 }: StockScreenProps): React.ReactElement {
   return (
-    <Box flexDirection="column">
-      <Table
-        columns={columns}
-        rows={rows}
-        selectedIndex={selectedIndex}
-        keyFor={(row) => `${row.regionId}:${row.gpuName}`}
-        emptyMessage={loading ? "正在查询库存…" : "查询范围内没有空闲 GPU"}
-      />
-      <Box flexDirection="column" paddingX={1} marginTop={1}>
-        <Text dimColor>
-          「可建Pro」只有 {PRO_CREATE_REGIONS.map((r) => r.displayName).join(" / ")} 为是，
-          其余地区仅用于弹性部署。
-        </Text>
-        <Text color="yellow">
-          数字来自「弹性部署 GPU 库存」，不代表 Pro 实例可用量——实测出现过显示 140
-          张空闲、创建却提示暂无库存的情况。
-        </Text>
-      </Box>
-    </Box>
+    <ListPanel
+      title="GPU 库存"
+      columns={columns}
+      rows={rows}
+      selectedIndex={selectedIndex}
+      keyFor={(row) => `${row.regionId}:${row.gpuName}`}
+      emptyMessage={loading ? "正在查询库存…" : "查询范围内没有空闲 GPU"}
+      notes={NOTES}
+      width={width}
+      height={height}
+    />
   );
 }

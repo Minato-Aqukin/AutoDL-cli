@@ -287,17 +287,35 @@ describe("create wizard", () => {
   it("prints an equivalent CLI command, so the wizard teaches what it replaces", () => {
     const spec = GPU_SPECS.find((s) => s.id === "4090D");
     if (!spec) throw new Error("catalogue is missing 4090D");
-    expect(equivalentCommand({ spec, imageUuid: "base-image-l2t43iu6uk", ttlSeconds: 7200 })).toBe(
-      "autodl create --gpu 4090D --ttl 2h --wait",
-    );
+    expect(
+      equivalentCommand({
+        spec,
+        imageUuid: "base-image-l2t43iu6uk",
+        cuda: "11.8",
+        ttlSeconds: 7200,
+      }),
+    ).toBe("autodl create --gpu 4090D --ttl 2h --wait");
   });
 
   it("names a non-default image explicitly", () => {
     const spec = GPU_SPECS.find((s) => s.id === "h800");
     if (!spec) throw new Error("catalogue is missing h800");
-    expect(equivalentCommand({ spec, imageUuid: "base-image-other", ttlSeconds: 1800 })).toContain(
-      "--image base-image-other",
-    );
+    expect(
+      equivalentCommand({ spec, imageUuid: "base-image-other", cuda: "11.3", ttlSeconds: 1800 }),
+    ).toContain("--image base-image-other");
+  });
+
+  it("omits --ttl when no TTL was chosen, as the CLI spells no timer", () => {
+    const spec = GPU_SPECS.find((s) => s.id === "4090D");
+    if (!spec) throw new Error("catalogue is missing 4090D");
+    expect(
+      equivalentCommand({
+        spec,
+        imageUuid: "base-image-l2t43iu6uk",
+        cuda: "11.8",
+        ttlSeconds: null,
+      }),
+    ).toBe("autodl create --gpu 4090D --wait");
   });
 });
 
