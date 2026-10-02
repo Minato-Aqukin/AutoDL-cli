@@ -27,7 +27,7 @@ export type { ClientOptions } from "./core/client.js";
 export { AutoDLClient, DEFAULT_BASE_URL, redactToken } from "./core/client.js";
 export { formatDuration, parseDuration } from "./core/duration.js";
 export { getBalance, setNfsMount } from "./core/endpoints/account.js";
-export { listPrivateImages, saveImage } from "./core/endpoints/image.js";
+export { listAllPrivateImages, listPrivateImages, saveImage } from "./core/endpoints/image.js";
 export type { CreateInstanceInput } from "./core/endpoints/instance.js";
 export {
   createInstance,

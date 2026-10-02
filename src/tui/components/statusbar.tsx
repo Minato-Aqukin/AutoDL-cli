@@ -12,6 +12,15 @@ interface StatusBarProps {
 }
 
 /**
+ * Rows the status bar takes, so screens can budget what is left above it.
+ *
+ * Estimated rather than measured: Ink gives a child no way to learn the height it was
+ * handed. Being a row conservative costs one row of the list; being a row optimistic
+ * costs the bottom of the frame, which Ink drops without a word.
+ */
+export const STATUS_ROWS = 4;
+
+/**
  * Bottom bar: what is costing money right now, plus keys and the latest message.
  *
  * The running total is the reason the dashboard exists — AutoDL bills on power state,

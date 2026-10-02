@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { render } from "ink-testing-library";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listTracked } from "../../src/config/state.js";
 import { BASE_IMAGES, DEFAULT_BASE_IMAGE, parseCudaVersion } from "../../src/core/catalog.js";
+import type * as ImageEndpoints from "../../src/core/endpoints/image.js";
 import type { DashboardRow } from "../../src/tui/data.js";
 
 /**
@@ -24,6 +26,29 @@ interface CreatePayload {
 const create = vi.hoisted(() =>
   vi.fn(async (_client: unknown, _input: unknown): Promise<string> => "pro-new"),
 );
+
+vi.mock("../../src/core/endpoints/image.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ImageEndpoints>();
+  return {
+    ...actual,
+    listAllPrivateImages: vi.fn(async () => [
+      {
+        imageUuid: "image-mine",
+        name: "my-env",
+        status: "finished",
+        sizeBytes: 1,
+        createdAt: null,
+      },
+      {
+        imageUuid: "image-saving",
+        name: "wip",
+        status: "saving",
+        sizeBytes: 0,
+        createdAt: null,
+      },
+    ]),
+  };
+});
 
 vi.mock("../../src/core/endpoints/instance.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/core/endpoints/instance.js")>();
@@ -146,5 +171,69 @@ describe("the create wizard's payload", () => {
     // The invariant: the version sent describes the image sent alongside it.
     expect(payload.cudaFrom).toBe(parseCudaVersion(chosen?.cuda ?? "0"));
     expect(payload.cudaFrom).not.toBe(parseCudaVersion("11.8"));
+  });
+
+  it("arms no shutdown timer and tracks no TTL when 不限时 is chosen", async () => {
+    const { stdin, lastFrame } = render(
+      <App client={{} as never} token={TOKEN} tokenSource="config" onLogout={vi.fn()} />,
+    );
+    await flush();
+
+    stdin.write(ENTER); // detail
+    await flush();
+    stdin.write("n"); // wizard
+    await flush();
+    stdin.write(ENTER); // accept the GPU
+    await flush();
+    stdin.write(ENTER); // accept the image
+    await flush();
+    for (let i = 0; i < 10 && !lastFrame()?.includes("› 不限时"); i += 1) {
+      stdin.write("j");
+      await flush();
+    }
+    expect(lastFrame()).toContain("不会自动关机");
+    stdin.write(ENTER); // accept the TTL
+    await flush();
+    stdin.write(ENTER); // confirm
+    await flush();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0]?.[1] as { startCommand?: string };
+    expect(payload.startCommand).toBeUndefined();
+    expect(listTracked()).toEqual([]);
+  });
+
+  it("offers only finished private images, sent with the CLI's default CUDA floor", async () => {
+    // The image list carries no CUDA version; `autodl create --image <private>` assumes
+    // 11.8, and the wizard prints that command as its equivalent.
+    const { stdin, lastFrame } = render(
+      <App client={{} as never} token={TOKEN} tokenSource="config" onLogout={vi.fn()} />,
+    );
+    await flush();
+
+    stdin.write(ENTER); // detail
+    await flush();
+    stdin.write("n"); // wizard
+    await flush();
+    stdin.write(ENTER); // accept the GPU
+    await flush();
+    for (let i = 0; i < 20 && !lastFrame()?.includes("› 私有  my-env"); i += 1) {
+      stdin.write("k");
+      await flush();
+    }
+    // The cursor sits at the top, where an unfinished save would be listed beside it.
+    expect(lastFrame()).not.toContain("image-saving");
+    stdin.write(ENTER); // accept the image
+    await flush();
+    stdin.write(ENTER); // accept the TTL
+    await flush();
+    expect(lastFrame()).toContain("--image image-mine");
+    stdin.write(ENTER); // confirm
+    await flush();
+
+    expect(create).toHaveBeenCalledTimes(1);
+    const payload = create.mock.calls[0]?.[1] as CreatePayload;
+    expect(payload.imageUuid).toBe("image-mine");
+    expect(payload.cudaFrom).toBe(parseCudaVersion("11.8"));
   });
 });

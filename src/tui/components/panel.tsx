@@ -9,6 +9,9 @@ import type React from "react";
  * panels each spending a row on their own name costs more than all three borders do.
  */
 
+/** A panel's border plus its horizontal padding, in columns. */
+export const PANEL_PADDING = 4;
+
 interface PanelProps {
   title: string;
   /** Dimmed text after the title — a count, a unit, which instance this is about. */

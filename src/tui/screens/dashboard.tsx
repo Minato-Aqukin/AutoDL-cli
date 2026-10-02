@@ -6,7 +6,8 @@ import type { Balance, InstanceSnapshot } from "../../core/schemas.js";
 import { formatBytes, stringWidth } from "../../output/format.js";
 import { headerRows } from "../components/header.js";
 import { Gauge, LABEL_WIDTH, READING_WIDTH, Sparkline } from "../components/meters.js";
-import { Panel } from "../components/panel.js";
+import { PANEL_PADDING, Panel } from "../components/panel.js";
+import { STATUS_ROWS } from "../components/statusbar.js";
 import { type Column, clip, Table } from "../components/table.js";
 import type { DashboardRow, UsageHistory } from "../data.js";
 
@@ -121,19 +122,9 @@ function columnsFor(width: number): Column<DashboardRow>[] {
   return columns;
 }
 
-/**
- * Rows the chrome around the list takes.
- *
- * Estimated rather than measured: Ink gives a child no way to learn the height it was
- * handed. Being a row conservative costs one row of the list; being a row optimistic
- * costs the bottom of the frame, which Ink drops without a word.
- */
-const STATUS_ROWS = 4;
 /** The instance panel's border, its column labels, and the rule under them. */
 const PANEL_CHROME = 4;
 const METRIC_ROWS = 6;
-/** A panel's border plus its horizontal padding. */
-const PANEL_PADDING = 4;
 /** Space between the CPU reading and its sparkline. */
 const SPARK_GAP = 2;
 /** Widest instance name a panel's border will carry. */

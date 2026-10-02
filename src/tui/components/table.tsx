@@ -1,6 +1,7 @@
 import { Box, Text } from "ink";
 import type React from "react";
 import { stringWidth } from "../../output/format.js";
+import { centeredStart } from "../scroll.js";
 
 /**
  * A selectable fixed-width table.
@@ -114,12 +115,9 @@ export function Table<T>({
   }
 
   // Centred on the selection where the list allows it, so the row being acted on is
-  // always on screen and the rows around it stay stable while the cursor moves.
+  // always on screen with its neighbours around it.
   const visible = maxRows && maxRows > 0 ? Math.min(maxRows, rows.length) : rows.length;
-  const start = Math.max(
-    0,
-    Math.min(selectedIndex - Math.floor((visible - 1) / 2), rows.length - visible),
-  );
+  const start = centeredStart(selectedIndex, rows.length, visible);
   const window = rows.slice(start, start + visible);
 
   return (

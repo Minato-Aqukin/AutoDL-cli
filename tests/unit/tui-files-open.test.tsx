@@ -222,7 +222,7 @@ describe("power-on refreshes the files gate", () => {
     await vi.waitFor(
       () => {
         const frame = plain(lastFrame());
-        expect(frame).toContain("▸远程");
+        expect(frame).toContain("远程 /root/autodl-tmp");
         expect(frame).not.toContain("启动实例");
       },
       { timeout: 3000, interval: 10 },

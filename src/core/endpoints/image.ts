@@ -31,3 +31,16 @@ export async function listPrivateImages(
   const list = Array.isArray(data?.list) ? data.list : [];
   return { images: list.map(normalizeImage), pagination: normalizePagination(data) };
 }
+
+/** Walk every page; an account can hold more images than one page returns. */
+export async function listAllPrivateImages(client: AutoDLClient): Promise<PrivateImage[]> {
+  const pageSize = 100;
+  const first = await listPrivateImages(client, { pageIndex: 1, pageSize });
+  const all = [...first.images];
+  for (let page = 2; page <= first.pagination.maxPage; page++) {
+    const next = await listPrivateImages(client, { pageIndex: page, pageSize });
+    all.push(...next.images);
+    if (next.images.length === 0) break;
+  }
+  return all;
+}
